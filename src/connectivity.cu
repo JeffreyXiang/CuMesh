@@ -1083,32 +1083,4 @@ void CuMesh::get_boundary_loops() {
 }
 
 
-void CuMesh::clear_connectivity() {
-    edges.free();
-    boundaries.free();
-    vert_is_boundary.free();
-    vert_is_manifold.free();
-    edge_is_manifold.free();
-    vert2edge.free();
-    vert2edge_cnt.free();
-    vert2edge_offset.free();
-    vert2bound.free();
-    vert2bound_cnt.free();
-    vert2bound_offset.free();
-    edge2face.free();
-    edge2face_cnt.free();
-    edge2face_offset.free();
-    face2edge.free();
-    vert2face.free();
-    vert2face_cnt.free();
-    vert2face_offset.free();
-    manifold_face_adj.free();
-    manifold_bound_adj.free();
-    conn_comp_ids.free();
-    bound_conn_comp_ids.free();
-    loop_boundaries.free();
-    loop_boundaries_offset.free();
-}
-
-
 } // namespace cumesh

@@ -94,6 +94,8 @@ public:
 
     int num_boundary_loops() const;
 
+    void clear_cache();
+
     /**
      * Initialize mesh
      * 
@@ -340,8 +342,6 @@ public:
      * - loop_boundaries_offset
      */
     void get_boundary_loops();
-
-    void clear_connectivity();
 
 
     // Cleanup functions

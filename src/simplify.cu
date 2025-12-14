@@ -572,8 +572,8 @@ std::tuple<int, int> CuMesh::simplify_step(float lambda_edge_length, float lambd
         std::cout << "collapse_edges: " << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() << " us" << std::endl;
     }
 
-    // Delete all connectivity info since mesh has changed
-    this->clear_connectivity();
+    // Delete all cached info since mesh has changed
+    this->clear_cache();
 
     return std::make_tuple(this->vertices.size, this->faces.size);
 }

@@ -182,8 +182,8 @@ void CuMesh::remove_unreferenced_vertices() {
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaFree(cu_vertex_is_referenced));
 
-    // Delete all connectivity info since mesh has changed
-    this->clear_connectivity();
+    // Delete all cached info since mesh has changed
+    this->clear_cache();
 }
 
 
@@ -609,8 +609,8 @@ void CuMesh::fill_holes(float max_hole_perimeter) {
     CUDA_CHECK(cudaFree(cu_new_loop_boundaries));
     CUDA_CHECK(cudaFree(cu_new_loop_bound_loop_ids));
 
-    // Delete all connectivity info since mesh has changed
-    this->clear_connectivity();
+    // Delete all cached info since mesh has changed
+    this->clear_cache();
 }
 
 
@@ -753,8 +753,8 @@ void CuMesh::repair_non_manifold_edges(){
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaFree(cu_vertex_ids));
 
-    // Delete all connectivity info since mesh has changed
-    this->clear_connectivity();
+    // Delete all cached info since mesh has changed
+    this->clear_cache();
 }
 
 
