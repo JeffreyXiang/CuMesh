@@ -684,7 +684,6 @@ void CuMesh::repair_non_manifold_edges(){
         this->get_manifold_face_adjacency();
     }
 
-    size_t V = this->vertices.size;
     size_t F = this->faces.size;
     size_t M = this->manifold_face_adj.size;
 
@@ -937,7 +936,6 @@ static __global__ void compress_components_with_orientation_kernel(
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= F) return;
 
-    int is_flipped = 0;
     int p = conn_comp_ids[tid] >> 1;
     int f = conn_comp_ids[tid] & 1;
     while (p != (conn_comp_ids[p] >> 1)) {

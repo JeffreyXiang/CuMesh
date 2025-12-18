@@ -414,7 +414,7 @@ void CuMesh::get_boundary_info() {
 
     // Select boundary edges
     size_t temp_storage_bytes = 0;
-    int *cu_num_boundary, *cu_edge_idx, *cu_manifold_edge_idx;
+    int *cu_num_boundary, *cu_edge_idx;
     CUDA_CHECK(cudaMalloc(&cu_num_boundary, sizeof(int)));
     CUDA_CHECK(cudaMalloc(&cu_edge_idx, E * sizeof(int)));
     this->boundaries.resize(E);
@@ -512,7 +512,6 @@ void CuMesh::get_vertex_boundary_adjacency() {
     if (this->boundaries.is_empty()) {
         this->get_boundary_info();
     }
-    size_t E = this->edges.size;
     size_t V = this->vertices.size;
     size_t B = this->boundaries.size;
 
@@ -679,7 +678,6 @@ void CuMesh::get_manifold_face_adjacency() {
         this->get_edge_is_manifold();
     }
     size_t E = this->edges.size;
-    size_t F = this->faces.size;
 
     // Select manifold edges
     size_t temp_storage_bytes = 0;
@@ -758,7 +756,6 @@ void CuMesh::get_manifold_boundary_adjacency() {
         this->get_vertex_is_manifold();
     }
     size_t V = this->vertices.size;
-    size_t B = this->boundaries.size;
 
     // Select manifold boundary vertices
     size_t temp_storage_bytes = 0;

@@ -32,17 +32,17 @@ __device__ inline void unpack_key_value_positive(uint64_t key_value, int& key, f
 }
 
 
-static __global__ void init_normal_cones_kernel(
-    const float3* face_normals,
-    const int F,
-    float4* chart_normal_cones
-) {
-    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= F) return;
-
-    float3 n = face_normals[tid];
-    chart_normal_cones[tid] = make_float4(n.x, n.y, n.z, 0.0f); // half angle = 0
-}
+// static __global__ void init_normal_cones_kernel(
+//     const float3* face_normals,
+//     const int F,
+//     float4* chart_normal_cones
+// ) {
+//     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (tid >= F) return;
+// 
+//     float3 n = face_normals[tid];
+//     chart_normal_cones[tid] = make_float4(n.x, n.y, n.z, 0.0f); // half angle = 0
+// }
 
 
 static __global__ void init_chart_adj_kernel(
