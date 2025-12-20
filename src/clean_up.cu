@@ -772,7 +772,7 @@ void CuMesh::repair_non_manifold_edges(){
 /**
  * Mark faces to remove for non-manifold edges
  * For each non-manifold edge (shared by >2 faces), only keep the first 2 faces
- * 
+ *
  * @param edge2face: edge to face adjacency
  * @param edge2face_offset: edge to face adjacency offset
  * @param edge2face_cnt: number of faces per edge
@@ -1086,6 +1086,79 @@ static __global__ void inplace_flip_faces_with_flags_kernel(
 }
 
 
+// Compute signed volume contribution per face: (v0 · (v1 × v2)) / 6
+// Positive volume means normals point outward (right-hand rule)
+static __global__ void compute_signed_volume_per_face_kernel(
+    const float3* vertices,
+    const int3* faces,
+    const int* conn_comp_ids,  // root_id << 1 | flip_flag
+    const int F,
+    float* signed_volumes  // output: signed volume per face
+) {
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= F) return;
+
+    int3 face = faces[tid];
+    float3 v0 = vertices[face.x];
+    float3 v1 = vertices[face.y];
+    float3 v2 = vertices[face.z];
+
+    // Cross product v1 × v2
+    float3 cross = make_float3(
+        v1.y * v2.z - v1.z * v2.y,
+        v1.z * v2.x - v1.x * v2.z,
+        v1.x * v2.y - v1.y * v2.x
+    );
+
+    // Dot product v0 · (v1 × v2)
+    float vol = v0.x * cross.x + v0.y * cross.y + v0.z * cross.z;
+
+    // If this face would be flipped, negate its contribution
+    int is_flipped = conn_comp_ids[tid] & 1;
+    if (is_flipped) {
+        vol = -vol;
+    }
+
+    signed_volumes[tid] = vol;
+}
+
+
+// Atomically add signed volume to the component's root
+static __global__ void accumulate_component_volume_kernel(
+    const float* signed_volumes,
+    const int* conn_comp_ids,
+    const int F,
+    float* component_volumes  // size F, but only root indices are used
+) {
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= F) return;
+
+    int root_id = conn_comp_ids[tid] >> 1;
+    atomicAdd(&component_volumes[root_id], signed_volumes[tid]);
+}
+
+
+// Fix orientation based on component volume and apply flip
+// If component volume is negative, the whole component needs to flip
+static __global__ void apply_volume_correction_kernel(
+    const float* component_volumes,
+    int* conn_comp_ids,
+    const int F
+) {
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= F) return;
+
+    int root_id = conn_comp_ids[tid] >> 1;
+    int my_flip = conn_comp_ids[tid] & 1;
+
+    // If component volume is negative, we need to flip all faces in this component
+    int volume_flip = (component_volumes[root_id] < 0.0f) ? 1 : 0;
+
+    // XOR to apply the volume correction
+    conn_comp_ids[tid] = (root_id << 1) | (my_flip ^ volume_flip);
+}
+
+
 void CuMesh::unify_face_orientations() {
     if (this->manifold_face_adj.is_empty()) {
         this->get_manifold_face_adjacency();
@@ -1132,15 +1205,50 @@ void CuMesh::unify_face_orientations() {
         CUDA_CHECK(cudaMemcpy(&h_end_flag, cu_end_flag, sizeof(int), cudaMemcpyDeviceToHost));
     } while (h_end_flag == 0);
     CUDA_CHECK(cudaFree(cu_end_flag));
+    CUDA_CHECK(cudaFree(cu_flipped));
 
-    // 3. Flip the orientation of the faces.
+    // 3. Compute signed volume per face to determine correct orientation
+    float* cu_signed_volumes;
+    float* cu_component_volumes;
+    CUDA_CHECK(cudaMalloc(&cu_signed_volumes, this->faces.size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&cu_component_volumes, this->faces.size * sizeof(float)));
+    CUDA_CHECK(cudaMemset(cu_component_volumes, 0, this->faces.size * sizeof(float)));
+
+    compute_signed_volume_per_face_kernel<<<(this->faces.size+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+        this->vertices.ptr,
+        this->faces.ptr,
+        conn_comp_with_flip,
+        this->faces.size,
+        cu_signed_volumes
+    );
+    CUDA_CHECK(cudaGetLastError());
+
+    // 4. Accumulate volumes per component
+    accumulate_component_volume_kernel<<<(this->faces.size+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+        cu_signed_volumes,
+        conn_comp_with_flip,
+        this->faces.size,
+        cu_component_volumes
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaFree(cu_signed_volumes));
+
+    // 5. Apply volume correction to all faces
+    apply_volume_correction_kernel<<<(this->faces.size+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+        cu_component_volumes,
+        conn_comp_with_flip,
+        this->faces.size
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaFree(cu_component_volumes));
+
+    // 6. Flip the orientation of the faces.
     inplace_flip_faces_with_flags_kernel<<<(this->faces.size+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
         this->faces.ptr,
         conn_comp_with_flip,
         this->faces.size
     );
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaFree(cu_flipped));
     CUDA_CHECK(cudaFree(conn_comp_with_flip));
 }
 
