@@ -371,6 +371,11 @@ public:
     void remove_duplicate_faces();
 
     /**
+     * Remove degenerate faces.
+     */
+    void remove_degenerate_faces(float abs_thresh, float rel_thresh);
+
+    /**
      * Fill holes.
      * This function requires:
      * - loop_boundaries

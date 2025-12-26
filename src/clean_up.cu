@@ -314,6 +314,62 @@ void CuMesh::remove_duplicate_faces() {
 }
 
 
+static __global__ void mark_degenerate_faces_kernel(
+    const float3* vertices,
+    const int3* faces,
+    const float abs_thresh,
+    const float rel_thresh,
+    const size_t F,
+    uint8_t* face_mask
+) {
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= F) return;
+    int3 face = faces[tid];
+
+    // 1. Check if any vertex is duplicated
+    if (face.x == face.y || face.y == face.z || face.z == face.x) {
+        face_mask[tid] = 0;
+        return;
+    }
+
+    // 2. Check if slim or zero area
+    Vec3f v0 = Vec3f(vertices[face.x]);
+    Vec3f v1 = Vec3f(vertices[face.y]);
+    Vec3f v2 = Vec3f(vertices[face.z]);
+    Vec3f e0 = v1 - v0;
+    Vec3f e1 = v2 - v1;
+    Vec3f e2 = v0 - v2;
+    float max_edge_len = fmaxf(fmaxf(e0.norm(), e1.norm()), e2.norm());
+    float area = e0.cross(e1).norm() / 2.0f;
+    float thresh = fminf(rel_thresh * max_edge_len * max_edge_len, abs_thresh);
+    if (area < thresh) {
+        face_mask[tid] = 0;
+        return;
+    }
+
+    face_mask[tid] = 1;
+}
+
+
+void CuMesh::remove_degenerate_faces(float abs_thresh, float rel_thresh) {
+    size_t F = this->faces.size;
+
+    uint8_t* cu_face_mask;
+    CUDA_CHECK(cudaMalloc(&cu_face_mask, F * sizeof(uint8_t)));
+    mark_degenerate_faces_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+        this->vertices.ptr,
+        this->faces.ptr,
+        abs_thresh, rel_thresh,
+        F,
+        cu_face_mask
+    );
+    CUDA_CHECK(cudaGetLastError());
+
+    this->_remove_faces(cu_face_mask);
+    CUDA_CHECK(cudaFree(cu_face_mask));
+}
+
+
 static __global__ void compute_loop_boundary_lengths(
     const float3* vertices,
     const uint64_t* edges,
