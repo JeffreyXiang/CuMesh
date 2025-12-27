@@ -85,14 +85,14 @@ Copyright (c) 2012 Brandon Pelfrey
 
 #ifndef XA_PRINT
 #define XA_PRINT(...) \
-	if (xatlas::internal::s_print && xatlas::internal::s_printVerbose) \
-		xatlas::internal::s_print(__VA_ARGS__);
+	if (cumesh_xatlas::internal::s_print && cumesh_xatlas::internal::s_printVerbose) \
+		cumesh_xatlas::internal::s_print(__VA_ARGS__);
 #endif
 
 #ifndef XA_PRINT_WARNING
 #define XA_PRINT_WARNING(...) \
-	if (xatlas::internal::s_print) \
-		xatlas::internal::s_print(__VA_ARGS__);
+	if (cumesh_xatlas::internal::s_print) \
+		cumesh_xatlas::internal::s_print(__VA_ARGS__);
 #endif
 
 #define XA_ALLOC(tag, type) (type *)internal::Realloc(nullptr, sizeof(type), tag, __FILE__, __LINE__)
@@ -160,7 +160,7 @@ Copyright (c) 2012 Brandon Pelfrey
 #define XA_SPRINTF(_buffer, _size, _format, ...) sprintf(_buffer, _format, __VA_ARGS__)
 #endif
 
-namespace xatlas {
+namespace cumesh_xatlas {
 namespace internal {
 
 static ReallocFunc s_realloc = realloc;
@@ -866,8 +866,8 @@ struct Extents2
 
 	Extents2(Vector2 p1, Vector2 p2)
 	{
-		min = xatlas::internal::min(p1, p2);
-		max = xatlas::internal::max(p1, p2);
+		min = cumesh_xatlas::internal::min(p1, p2);
+		max = cumesh_xatlas::internal::max(p1, p2);
 	}
 
 	void reset()
@@ -878,8 +878,8 @@ struct Extents2
 
 	void add(Vector2 p)
 	{
-		min = xatlas::internal::min(min, p);
-		max = xatlas::internal::max(max, p);
+		min = cumesh_xatlas::internal::min(min, p);
+		max = cumesh_xatlas::internal::max(max, p);
 	}
 
 	Vector2 midpoint() const
@@ -9931,17 +9931,17 @@ const char *StringForEnum(ProgressCategory category)
 	return "";
 }
 
-} // namespace xatlas
+} // namespace cumesh_xatlas
 
 #if XATLAS_C_API
-static_assert(sizeof(xatlas::Chart) == sizeof(xatlasChart), "xatlasChart size mismatch");
-static_assert(sizeof(xatlas::Vertex) == sizeof(xatlasVertex), "xatlasVertex size mismatch");
-static_assert(sizeof(xatlas::Mesh) == sizeof(xatlasMesh), "xatlasMesh size mismatch");
-static_assert(sizeof(xatlas::Atlas) == sizeof(xatlasAtlas), "xatlasAtlas size mismatch");
-static_assert(sizeof(xatlas::MeshDecl) == sizeof(xatlasMeshDecl), "xatlasMeshDecl size mismatch");
-static_assert(sizeof(xatlas::UvMeshDecl) == sizeof(xatlasUvMeshDecl), "xatlasUvMeshDecl size mismatch");
-static_assert(sizeof(xatlas::ChartOptions) == sizeof(xatlasChartOptions), "xatlasChartOptions size mismatch");
-static_assert(sizeof(xatlas::PackOptions) == sizeof(xatlasPackOptions), "xatlasPackOptions size mismatch");
+static_assert(sizeof(cumesh_xatlas::Chart) == sizeof(xatlasChart), "xatlasChart size mismatch");
+static_assert(sizeof(cumesh_xatlas::Vertex) == sizeof(xatlasVertex), "xatlasVertex size mismatch");
+static_assert(sizeof(cumesh_xatlas::Mesh) == sizeof(xatlasMesh), "xatlasMesh size mismatch");
+static_assert(sizeof(cumesh_xatlas::Atlas) == sizeof(xatlasAtlas), "xatlasAtlas size mismatch");
+static_assert(sizeof(cumesh_xatlas::MeshDecl) == sizeof(xatlasMeshDecl), "xatlasMeshDecl size mismatch");
+static_assert(sizeof(cumesh_xatlas::UvMeshDecl) == sizeof(xatlasUvMeshDecl), "xatlasUvMeshDecl size mismatch");
+static_assert(sizeof(cumesh_xatlas::ChartOptions) == sizeof(xatlasChartOptions), "xatlasChartOptions size mismatch");
+static_assert(sizeof(cumesh_xatlas::PackOptions) == sizeof(xatlasPackOptions), "xatlasPackOptions size mismatch");
 
 #ifdef __cplusplus
 extern "C" {
@@ -9949,92 +9949,92 @@ extern "C" {
 
 xatlasAtlas *xatlasCreate()
 {
-	return (xatlasAtlas *)xatlas::Create();
+	return (xatlasAtlas *)cumesh_xatlas::Create();
 }
 
 void xatlasDestroy(xatlasAtlas *atlas)
 {
-	xatlas::Destroy((xatlas::Atlas *)atlas);
+	cumesh_xatlas::Destroy((cumesh_xatlas::Atlas *)atlas);
 }
 
 xatlasAddMeshError xatlasAddMesh(xatlasAtlas *atlas, const xatlasMeshDecl *meshDecl, uint32_t meshCountHint)
 {
-	return (xatlasAddMeshError)xatlas::AddMesh((xatlas::Atlas *)atlas, *(const xatlas::MeshDecl *)meshDecl, meshCountHint);
+	return (xatlasAddMeshError)cumesh_xatlas::AddMesh((cumesh_xatlas::Atlas *)atlas, *(const cumesh_xatlas::MeshDecl *)meshDecl, meshCountHint);
 }
 
 void xatlasAddMeshJoin(xatlasAtlas *atlas)
 {
-	xatlas::AddMeshJoin((xatlas::Atlas *)atlas);
+	cumesh_xatlas::AddMeshJoin((cumesh_xatlas::Atlas *)atlas);
 }
 
 xatlasAddMeshError xatlasAddUvMesh(xatlasAtlas *atlas, const xatlasUvMeshDecl *decl)
 {
-	return (xatlasAddMeshError)xatlas::AddUvMesh((xatlas::Atlas *)atlas, *(const xatlas::UvMeshDecl *)decl);
+	return (xatlasAddMeshError)cumesh_xatlas::AddUvMesh((cumesh_xatlas::Atlas *)atlas, *(const cumesh_xatlas::UvMeshDecl *)decl);
 }
 
 void xatlasComputeCharts(xatlasAtlas *atlas, const xatlasChartOptions *chartOptions)
 {
-	xatlas::ComputeCharts((xatlas::Atlas *)atlas, chartOptions ? *(xatlas::ChartOptions *)chartOptions : xatlas::ChartOptions());
+	cumesh_xatlas::ComputeCharts((cumesh_xatlas::Atlas *)atlas, chartOptions ? *(cumesh_xatlas::ChartOptions *)chartOptions : cumesh_xatlas::ChartOptions());
 }
 
 void xatlasPackCharts(xatlasAtlas *atlas, const xatlasPackOptions *packOptions)
 {
-	xatlas::PackCharts((xatlas::Atlas *)atlas, packOptions ? *(xatlas::PackOptions *)packOptions : xatlas::PackOptions());
+	cumesh_xatlas::PackCharts((cumesh_xatlas::Atlas *)atlas, packOptions ? *(cumesh_xatlas::PackOptions *)packOptions : cumesh_xatlas::PackOptions());
 }
 
 void xatlasGenerate(xatlasAtlas *atlas, const xatlasChartOptions *chartOptions, const xatlasPackOptions *packOptions)
 {
-	xatlas::Generate((xatlas::Atlas *)atlas, chartOptions ? *(xatlas::ChartOptions *)chartOptions : xatlas::ChartOptions(), packOptions ? *(xatlas::PackOptions *)packOptions : xatlas::PackOptions());
+	cumesh_xatlas::Generate((cumesh_xatlas::Atlas *)atlas, chartOptions ? *(cumesh_xatlas::ChartOptions *)chartOptions : cumesh_xatlas::ChartOptions(), packOptions ? *(cumesh_xatlas::PackOptions *)packOptions : cumesh_xatlas::PackOptions());
 }
 
 void xatlasSetProgressCallback(xatlasAtlas *atlas, xatlasProgressFunc progressFunc, void *progressUserData)
 {
-	xatlas::ProgressFunc pf;
+	cumesh_xatlas::ProgressFunc pf;
 	*(void **)&pf = (void *)progressFunc;
-	xatlas::SetProgressCallback((xatlas::Atlas *)atlas, pf, progressUserData);
+	cumesh_xatlas::SetProgressCallback((cumesh_xatlas::Atlas *)atlas, pf, progressUserData);
 }
 
 void xatlasSetAlloc(xatlasReallocFunc reallocFunc, xatlasFreeFunc freeFunc)
 {
-	xatlas::SetAlloc((xatlas::ReallocFunc)reallocFunc, (xatlas::FreeFunc)freeFunc);
+	cumesh_xatlas::SetAlloc((cumesh_xatlas::ReallocFunc)reallocFunc, (cumesh_xatlas::FreeFunc)freeFunc);
 }
 
 void xatlasSetPrint(xatlasPrintFunc print, bool verbose)
 {
-	xatlas::SetPrint((xatlas::PrintFunc)print, verbose);
+	cumesh_xatlas::SetPrint((cumesh_xatlas::PrintFunc)print, verbose);
 }
 
 const char *xatlasAddMeshErrorString(xatlasAddMeshError error)
 {
-	return xatlas::StringForEnum((xatlas::AddMeshError)error);
+	return cumesh_xatlas::StringForEnum((cumesh_xatlas::AddMeshError)error);
 }
 
 const char *xatlasProgressCategoryString(xatlasProgressCategory category)
 {
-	return xatlas::StringForEnum((xatlas::ProgressCategory)category);
+	return cumesh_xatlas::StringForEnum((cumesh_xatlas::ProgressCategory)category);
 }
 
 void xatlasMeshDeclInit(xatlasMeshDecl *meshDecl)
 {
-	xatlas::MeshDecl init;
+	cumesh_xatlas::MeshDecl init;
 	memcpy(meshDecl, &init, sizeof(init));
 }
 
 void xatlasUvMeshDeclInit(xatlasUvMeshDecl *uvMeshDecl)
 {
-	xatlas::UvMeshDecl init;
+	cumesh_xatlas::UvMeshDecl init;
 	memcpy(uvMeshDecl, &init, sizeof(init));
 }
 
 void xatlasChartOptionsInit(xatlasChartOptions *chartOptions)
 {
-	xatlas::ChartOptions init;
+	cumesh_xatlas::ChartOptions init;
 	memcpy(chartOptions, &init, sizeof(init));
 }
 
 void xatlasPackOptionsInit(xatlasPackOptions *packOptions)
 {
-	xatlas::PackOptions init;
+	cumesh_xatlas::PackOptions init;
 	memcpy(packOptions, &init, sizeof(init));
 }
 
