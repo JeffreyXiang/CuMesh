@@ -139,8 +139,13 @@ torch::Tensor cumesh::get_sparse_voxel_grid_active_vertices(
     const int H,
     const int D
 ) {
-    // Get the number of active vertices for each voxel
+    // Handle empty input - return early to avoid launching kernels with 0 blocks
     size_t M = coords.size(0);
+    if (M == 0) {
+        return torch::empty({0, 3}, torch::dtype(torch::kInt32).device(hashmap_keys.device()));
+    }
+
+    // Get the number of active vertices for each voxel
     size_t N = hashmap_keys.size(0);
     int* num_vertices;
     CUDA_CHECK(cudaMalloc(&num_vertices, (M + 1) * sizeof(int)));
@@ -173,7 +178,7 @@ torch::Tensor cumesh::get_sparse_voxel_grid_active_vertices(
     }
     CUDA_CHECK(cudaGetLastError());
 
-    // Compute the offset 
+    // Compute the offset
     size_t temp_storage_bytes = 0;
     cub::DeviceScan::ExclusiveSum(nullptr, temp_storage_bytes, num_vertices, M + 1);
     void* d_temp_storage = nullptr;
