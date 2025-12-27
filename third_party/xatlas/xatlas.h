@@ -34,7 +34,7 @@ Copyright NVIDIA Corporation 2006 -- Ignacio Castano <icastano@nvidia.com>
 #include <stddef.h>
 #include <stdint.h>
 
-namespace xatlas {
+namespace cumesh_xatlas {
 
 enum class ChartType
 {
@@ -264,6 +264,6 @@ void SetPrint(PrintFunc print, bool verbose);
 const char *StringForEnum(AddMeshError error);
 const char *StringForEnum(ProgressCategory category);
 
-} // namespace xatlas
+} // namespace cumesh_xatlas
 
 #endif // XATLAS_H
