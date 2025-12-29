@@ -1074,13 +1074,13 @@ void CuMesh::get_boundary_loops() {
     temp_storage_bytes = 0;
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         nullptr, temp_storage_bytes,
-        this->loop_boundaries_offset.ptr,
+        this->loop_boundaries_offset.ptr,this->loop_boundaries_offset.ptr,
         this->num_bound_loops + 1
     ));
     this->cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         this->cub_temp_storage.ptr, temp_storage_bytes,
-        this->loop_boundaries_offset.ptr,
+        this->loop_boundaries_offset.ptr,this->loop_boundaries_offset.ptr,
         this->num_bound_loops + 1
     ));
 }

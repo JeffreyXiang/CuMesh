@@ -215,13 +215,13 @@ int compress_ids(T* ids, size_t N, Buffer<char>& cub_temp_storage, T* inverse=nu
     temp_storage_bytes = 0;
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         nullptr, temp_storage_bytes,
-        cu_new_ids,
+        cu_new_ids,cu_new_ids,
         N
     ));
     cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         cub_temp_storage.ptr, temp_storage_bytes,
-        cu_new_ids,
+        cu_new_ids,cu_new_ids,
         N
     ));
     

@@ -2,10 +2,56 @@
 #include "dtypes.cuh"
 #include "shared.h"
 #include <cub/cub.cuh>
-
+#include <thrust/device_vector.h>
+#include <thrust/sort.h>
+#include <thrust/sequence.h>
+#include <thrust/execution_policy.h>
 
 namespace cumesh {
 
+    // Marks faces as 1 (keep) or 0 (remove) by comparing adjacent sorted faces
+__global__ void mark_duplicates_from_indices_kernel(
+    const int* sorted_indices,
+    const int3* faces,
+    uint8_t* mask_original,
+    int n
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    int current_original_idx = sorted_indices[idx];
+
+    // The first element in the sorted list is always unique
+    if (idx == 0) {
+        mask_original[current_original_idx] = 1;
+        return;
+    }
+
+    // Compare with the previous element in the sorted list
+    int prev_original_idx = sorted_indices[idx - 1];
+    
+    int3 curr_f = faces[current_original_idx];
+    int3 prev_f = faces[prev_original_idx];
+
+    // If identical to previous, it's a duplicate -> mark 0 (remove)
+    // Otherwise -> mark 1 (keep)
+    bool is_duplicate = (curr_f.x == prev_f.x && curr_f.y == prev_f.y && curr_f.z == prev_f.z);
+    mask_original[current_original_idx] = is_duplicate ? 0 : 1;
+}
+
+// Comparator for Thrust to sort indices based on face values
+struct FaceComparator {
+    const int3* faces;
+    FaceComparator(const int3* f) : faces(f) {}
+
+    __device__ bool operator()(int i, int j) const {
+        const int3& a = faces[i];
+        const int3& b = faces[j];
+        if (a.x != b.x) return a.x < b.x;
+        if (a.y != b.y) return a.y < b.y;
+        return a.z < b.z;
+    }
+};
 
 static __global__ void copy_vec3f_to_float3_kernel(
     const Vec3f* vec3f,
@@ -152,12 +198,12 @@ void CuMesh::remove_unreferenced_vertices() {
     size_t temp_storage_bytes = 0;
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         nullptr, temp_storage_bytes,
-        cu_vertex_is_referenced, V+1
+        cu_vertex_is_referenced,cu_vertex_is_referenced, V+1
     ));
     this->cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         this->cub_temp_storage.ptr, temp_storage_bytes,
-        cu_vertex_is_referenced, V+1
+        cu_vertex_is_referenced,cu_vertex_is_referenced, V+1
     ));
     int new_num_vertices;
     CUDA_CHECK(cudaMemcpy(&new_num_vertices, cu_vertex_is_referenced + V, sizeof(int), cudaMemcpyDeviceToHost));
@@ -226,12 +272,14 @@ static __global__ void select_first_in_each_group_kernel(
     }
 }
 
-
-struct int3_decomposer
+struct int3_comparator
 {
-    __host__ __device__ ::cuda::std::tuple<int&, int&, int&> operator()(int3& key) const
+    __host__ __device__ bool operator()(const int3& a, const int3& b) const
     {
-        return {key.x, key.y, key.z};
+        // Lexicographical comparison: check x, then y, then z
+        if (a.x != b.x) return a.x < b.x;
+        if (a.y != b.y) return a.y < b.y;
+        return a.z < b.z;
     }
 };
 
@@ -239,80 +287,53 @@ struct int3_decomposer
 void CuMesh::remove_duplicate_faces() {
     size_t F = this->faces.size;
 
-    // Create a temporary sorted copy of faces for duplicate detection
-    // Do NOT modify the original faces to preserve vertex order and normals
+    // 1. Create a temporary copy of faces for canonicalization
     int3 *cu_sorted_faces;
     CUDA_CHECK(cudaMalloc(&cu_sorted_faces, F * sizeof(int3)));
     CUDA_CHECK(cudaMemcpy(cu_sorted_faces, this->faces.ptr, F * sizeof(int3), cudaMemcpyDeviceToDevice));
 
-    // Sort vertices within each face (in the temporary copy)
-    sort_faces_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+    // 2. Sort vertices within each face (canonical form)
+    // (This ensures that face [0,1,2] is treated same as [2,0,1])
+    sort_faces_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(cu_sorted_faces, F);
+    CUDA_CHECK(cudaGetLastError());
+
+    // 3. Create indices [0, 1, 2, ... F-1]
+    int *cu_sorted_face_indices;
+    CUDA_CHECK(cudaMalloc(&cu_sorted_face_indices, F * sizeof(int)));
+    
+    // Use Thrust to generate sequence
+    thrust::sequence(thrust::device, 
+                     thrust::device_pointer_cast(cu_sorted_face_indices), 
+                     thrust::device_pointer_cast(cu_sorted_face_indices + F));
+
+    // 4. Sort the INDICES based on the face values using Thrust
+    // This groups identical faces together in the index list
+    thrust::sort(thrust::device, 
+                 thrust::device_pointer_cast(cu_sorted_face_indices), 
+                 thrust::device_pointer_cast(cu_sorted_face_indices + F), 
+                 FaceComparator(cu_sorted_faces));
+
+    // 5. Mark duplicates
+    // We traverse the sorted indices. If neighbors are equal, mark original index for removal.
+    uint8_t* cu_face_mask_original;
+    CUDA_CHECK(cudaMalloc(&cu_face_mask_original, F * sizeof(uint8_t)));
+
+    mark_duplicates_from_indices_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+        cu_sorted_face_indices,
         cu_sorted_faces,
-        F
+        cu_face_mask_original,
+        (int)F
     );
     CUDA_CHECK(cudaGetLastError());
 
-    // Sort all faces globally by their sorted vertex indices
-    size_t temp_storage_bytes = 0;
-    int *cu_sorted_face_indices;
-    CUDA_CHECK(cudaMalloc(&cu_sorted_face_indices, F * sizeof(int)));
-    arange_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(cu_sorted_face_indices, F);
-    CUDA_CHECK(cudaGetLastError());
-
-    int *cu_sorted_indices_output;
-    int3 *cu_sorted_faces_output;
-    CUDA_CHECK(cudaMalloc(&cu_sorted_indices_output, F * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&cu_sorted_faces_output, F * sizeof(int3)));
-
-    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-        nullptr, temp_storage_bytes,
-        cu_sorted_faces, cu_sorted_faces_output,
-        cu_sorted_face_indices, cu_sorted_indices_output,
-        F,
-        int3_decomposer{}
-    ));
-    this->cub_temp_storage.resize(temp_storage_bytes);
-    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-        this->cub_temp_storage.ptr, temp_storage_bytes,
-        cu_sorted_faces, cu_sorted_faces_output,
-        cu_sorted_face_indices, cu_sorted_indices_output,
-        F,
-        int3_decomposer{}
-    ));
+    // 6. Cleanup temporary memory
     CUDA_CHECK(cudaFree(cu_sorted_faces));
     CUDA_CHECK(cudaFree(cu_sorted_face_indices));
 
-    // Select first in each group of duplicate faces (based on sorted faces)
-    uint8_t* cu_face_mask_sorted;
-    CUDA_CHECK(cudaMalloc(&cu_face_mask_sorted, F * sizeof(uint8_t)));
-    select_first_in_each_group_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
-        cu_sorted_faces_output,
-        F,
-        cu_face_mask_sorted
-    );
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaFree(cu_sorted_faces_output));
-
-    // Map the mask back to original face order using scatter
-    // scatter: output[indices[i]] = values[i]
-    // This maps: cu_face_mask_original[original_idx] = cu_face_mask_sorted[sorted_position]
-    uint8_t* cu_face_mask_original;
-    CUDA_CHECK(cudaMalloc(&cu_face_mask_original, F * sizeof(uint8_t)));
-    scatter_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
-        cu_sorted_indices_output,  // indices: sorted_position -> original_idx
-        cu_face_mask_sorted,       // values: mask at sorted_position
-        F,
-        cu_face_mask_original      // output: mask at original position
-    );
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaFree(cu_face_mask_sorted));
-    CUDA_CHECK(cudaFree(cu_sorted_indices_output));
-
-    // Select faces to keep (preserving original vertex order)
+    // 7. Remove faces using the generated mask
     this->_remove_faces(cu_face_mask_original);
     CUDA_CHECK(cudaFree(cu_face_mask_original));
 }
-
 
 static __global__ void mark_degenerate_faces_kernel(
     const float3* vertices,
@@ -542,13 +563,13 @@ void CuMesh::fill_holes(float max_hole_perimeter) {
     temp_storage_bytes = 0;
     CUDA_CHECK(cub::DeviceScan::InclusiveSum(
         nullptr, temp_storage_bytes,
-        cu_loop_bound_loop_ids,
+        cu_loop_bound_loop_ids,cu_loop_bound_loop_ids,
         E
     ));
     this->cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceScan::InclusiveSum(
         this->cub_temp_storage.ptr, temp_storage_bytes,
-        cu_loop_bound_loop_ids,
+        cu_loop_bound_loop_ids,cu_loop_bound_loop_ids,
         E
     ));
 
@@ -614,13 +635,13 @@ void CuMesh::fill_holes(float max_hole_perimeter) {
     temp_storage_bytes = 0;
     CUDA_CHECK(cub::DeviceScan::InclusiveSum(
         nullptr, temp_storage_bytes,
-        cu_new_loop_bound_loop_ids,
+        cu_new_loop_bound_loop_ids,cu_new_loop_bound_loop_ids,
         new_num_loop_boundaries
     ));
     this->cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceScan::InclusiveSum(
         this->cub_temp_storage.ptr, temp_storage_bytes,
-        cu_new_loop_bound_loop_ids,
+        cu_new_loop_bound_loop_ids,cu_new_loop_bound_loop_ids,
         new_num_loop_boundaries
     ));
 
