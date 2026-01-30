@@ -30,11 +30,13 @@ def remesh_narrow_band_dc(
     band: float = 1,
     project_back: float = 0,
     verbose: bool = False,
-    bvh = None
+    bvh = None,
+    preserve_sharp_edges: bool = False,
+    sharp_angle_threshold: float = 30.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Remesh the mesh using the narrow band UDF and dual contouring.
-    
+
     This function implements a narrow-band Isosurface extraction.
     It first builds a sparse voxel grid around the surface using an octree-like approach,
     then computes Dual Contouring vertices using the C++ extension,
@@ -49,6 +51,8 @@ def remesh_narrow_band_dc(
         band: width of the narrow band in voxel units.
         project_back: float ratio to project the vertices back to the original mesh
         verbose: print progress.
+        preserve_sharp_edges: if True, detect and preserve edges sharper than threshold.
+        sharp_angle_threshold: angle in degrees above which edges are considered sharp.
 
     Returns:
         (V_new, F_new): Tuple of vertices and faces of the new mesh.
@@ -172,17 +176,27 @@ def remesh_narrow_band_dc(
     # -------------------------------------------------------------------------
     if verbose:
         print("Running Dual Contouring...")
-        
+        if preserve_sharp_edges:
+            print(f"  Sharp edge preservation enabled (threshold: {sharp_angle_threshold}°)")
+
     # Insert Grid Vertices into a new hashmap so DC kernel can look up values by coord
     hashmap_vert = _init_hashmap(resolution + 1, 2 * Nvert, device)
     # The hashmap maps (x,y,z) -> index in grid_verts/distances_vert
     _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vert, torch.cat([torch.zeros_like(grid_verts[:, :1]), grid_verts], dim=1), resolution + 1, resolution + 1, resolution + 1)
-    
-    # Compute dual vertices positions (Relaxation / Mean of intersections) and intersections
+
+    # Compute dual vertices positions and intersections
     # Returns (Nvox, 3) float tensor and (Nvox, 3) int tensor
-    dual_verts, intersected = _C.simple_dual_contour(
-        *hashmap_vert, coords, distances_vert, resolution + 1, resolution + 1, resolution + 1
-    )
+    if preserve_sharp_edges:
+        # Use sharp edge preserving kernel with gradient-based normal clustering
+        dual_verts, intersected = _C.simple_dual_contour_sharp(
+            *hashmap_vert, coords, distances_vert, resolution + 1, resolution + 1, resolution + 1,
+            sharp_angle_threshold
+        )
+    else:
+        # Original behavior: mean of intersections
+        dual_verts, intersected = _C.simple_dual_contour(
+            *hashmap_vert, coords, distances_vert, resolution + 1, resolution + 1, resolution + 1
+        )
     
     # -------------------------------------------------------------------------
     # 6. Topology Generation (Connectivity)

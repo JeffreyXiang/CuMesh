@@ -321,6 +321,13 @@ static void get_chart_connectivity(
         M
     ));
     CUDA_CHECK(cudaFree(cu_raw_lengths));
+	
+    #if CUDART_VERSION >= 12090
+        auto reduce_op = ::cuda::std::plus();
+    #else
+        auto reduce_op = cub::Sum();
+    #endif
+	
 
     // 1.3 Reduce By Key (Aggregate duplicate chart pairs by summing lengths)
     int* cu_num_chart_adjs;
@@ -333,11 +340,7 @@ static void get_chart_connectivity(
         cu_sorted_lengths,
         mesh.atlas_chart_adj_length.ptr,
         cu_num_chart_adjs,
-#if CUDART_VERSION >= 12090
-        ::cuda::std::plus(),
-#else
-        cub::Sum(),
-#endif
+		reduce_op,
         M
     ));
     mesh.cub_temp_storage.resize(temp_storage_bytes);
@@ -348,11 +351,7 @@ static void get_chart_connectivity(
         cu_sorted_lengths,
         mesh.atlas_chart_adj_length.ptr,
         cu_num_chart_adjs,
-#if CUDART_VERSION >= 12090
-        ::cuda::std::plus(),
-#else
-        cub::Sum(),
-#endif
+		reduce_op,
         M
     ));
     CUDA_CHECK(cudaMemcpy(&mesh.atlas_chart_adj.size, cu_num_chart_adjs, sizeof(int), cudaMemcpyDeviceToHost));
