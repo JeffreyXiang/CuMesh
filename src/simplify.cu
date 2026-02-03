@@ -473,12 +473,12 @@ void collapse_edges(
     size_t temp_storage_bytes = 0;
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         nullptr, temp_storage_bytes,
-        ctx.vertices_map.ptr, V+1
+        ctx.vertices_map.ptr,ctx.vertices_map.ptr, V+1
     ));
     ctx.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         ctx.cub_temp_storage.ptr, temp_storage_bytes,
-        ctx.vertices_map.ptr, V+1
+        ctx.vertices_map.ptr,ctx.vertices_map.ptr, V+1
     ));
     int new_num_vertices;
     CUDA_CHECK(cudaMemcpy(&new_num_vertices, ctx.vertices_map.ptr + V, sizeof(int), cudaMemcpyDeviceToHost));
@@ -497,12 +497,12 @@ void collapse_edges(
     // get faces map
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         nullptr, temp_storage_bytes,
-        ctx.faces_map.ptr, F+1
+        ctx.faces_map.ptr,ctx.faces_map.ptr,F+1
     ));
     ctx.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         ctx.cub_temp_storage.ptr, temp_storage_bytes,
-        ctx.faces_map.ptr, F+1
+        ctx.faces_map.ptr,ctx.faces_map.ptr, F+1
     ));
     int new_num_faces;
     CUDA_CHECK(cudaMemcpy(&new_num_faces, ctx.faces_map.ptr + F, sizeof(int), cudaMemcpyDeviceToHost));
