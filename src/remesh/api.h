@@ -67,4 +67,31 @@ std::tuple<torch::Tensor, torch::Tensor> simple_dual_contour(
 );
 
 
+/**
+ * Isosurfacing with sharp edge preservation using gradient-based normal clustering.
+ *
+ * @param hashmap_keys  [Nvert] uint32/uint64 hashmap of the vertices keys
+ * @param hashmap_vals  [Nvert] uint32 tensor containing the hashmap values as vertex indices
+ * @param coords        [Mvox, 3] int32 tensor containing the coordinates of the active voxels
+ * @param udf           [Mvert] float tensor containing the UDF/SDF values at the vertices
+ * @param W             the number of width dimensions
+ * @param H             the number of height dimensions
+ * @param D             the number of depth dimensions
+ * @param sharp_angle_threshold  angle in degrees above which edges are considered sharp
+ *
+ * @return              [L, 3] float tensor containing the active vertices (Dual Vertices)
+ *                      [L, 3] int32 tensor containing the intersected edges
+ */
+std::tuple<torch::Tensor, torch::Tensor> simple_dual_contour_sharp(
+    const torch::Tensor& hashmap_keys,
+    const torch::Tensor& hashmap_vals,
+    const torch::Tensor& coords,
+    const torch::Tensor& udf,
+    int W,
+    int H,
+    int D,
+    float sharp_angle_threshold
+);
+
+
 } // namespace cumesh
