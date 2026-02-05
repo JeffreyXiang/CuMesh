@@ -1,4 +1,4 @@
 [submodule "third_party/cubvh"]
 	path = third_party/cubvh
-	url = https://github.com/JeffreyXiang/cubvh.git
+	url = https://github.com/ashawkey/cubvh.git
 	branch = trellis.2
