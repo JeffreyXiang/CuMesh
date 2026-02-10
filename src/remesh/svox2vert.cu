@@ -180,10 +180,10 @@ torch::Tensor cumesh::get_sparse_voxel_grid_active_vertices(
 
     // Compute the offset
     size_t temp_storage_bytes = 0;
-    cub::DeviceScan::ExclusiveSum(nullptr, temp_storage_bytes, num_vertices, M + 1);
+    cub::DeviceScan::ExclusiveSum(nullptr, temp_storage_bytes, num_vertices,num_vertices, M + 1);
     void* d_temp_storage = nullptr;
     CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
-    cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes, num_vertices, M + 1);
+    cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes, num_vertices,num_vertices, M + 1);
     CUDA_CHECK(cudaFree(d_temp_storage));
     int total_vertices;
     CUDA_CHECK(cudaMemcpy(&total_vertices, num_vertices + M, sizeof(int), cudaMemcpyDeviceToHost));
