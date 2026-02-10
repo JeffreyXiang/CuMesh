@@ -95,6 +95,7 @@ ext_modules = [
         extra_compile_args={
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
+            
         },
     ),
 
@@ -117,6 +118,7 @@ ext_modules = [
             "nvcc": nvcc_flags + [
                 # The following definitions must be undefined
                 # since we need half-precision operation.
+                "--extended-lambda",
                 "-U__CUDA_NO_HALF_OPERATORS__",
                 "-U__CUDA_NO_HALF_CONVERSIONS__",
                 "-U__CUDA_NO_HALF2_OPERATORS__",
