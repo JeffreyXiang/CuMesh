@@ -2,14 +2,16 @@
 #include "dtypes.cuh"
 #include "shared.h"
 #include <cub/cub.cuh>
-#include <thrust/device_vector.h>
+#if defined(CUDART_VERSION) && (CUDART_VERSION < 12040)
 #include <thrust/sort.h>
 #include <thrust/sequence.h>
 #include <thrust/execution_policy.h>
+#endif
 
 namespace cumesh {
 
-    // Marks faces as 1 (keep) or 0 (remove) by comparing adjacent sorted faces
+#if defined(CUDART_VERSION) && (CUDART_VERSION < 12040)
+// Marks faces as 1 (keep) or 0 (remove) by comparing adjacent sorted faces
 __global__ void mark_duplicates_from_indices_kernel(
     const int* sorted_indices,
     const int3* faces,
@@ -52,6 +54,7 @@ struct FaceComparator {
         return a.z < b.z;
     }
 };
+#endif
 
 static __global__ void copy_vec3f_to_float3_kernel(
     const Vec3f* vec3f,
@@ -272,14 +275,11 @@ static __global__ void select_first_in_each_group_kernel(
     }
 }
 
-struct int3_comparator
+struct int3_decomposer
 {
-    __host__ __device__ bool operator()(const int3& a, const int3& b) const
+    __host__ __device__ ::cuda::std::tuple<int&, int&, int&> operator()(int3& key) const
     {
-        // Lexicographical comparison: check x, then y, then z
-        if (a.x != b.x) return a.x < b.x;
-        if (a.y != b.y) return a.y < b.y;
-        return a.z < b.z;
+        return {key.x, key.y, key.z};
     }
 };
 
@@ -287,34 +287,33 @@ struct int3_comparator
 void CuMesh::remove_duplicate_faces() {
     size_t F = this->faces.size;
 
-    // 1. Create a temporary copy of faces for canonicalization
+    // Create a temporary sorted copy of faces for duplicate detection
+    // Do NOT modify the original faces to preserve vertex order and normals
     int3 *cu_sorted_faces;
     CUDA_CHECK(cudaMalloc(&cu_sorted_faces, F * sizeof(int3)));
     CUDA_CHECK(cudaMemcpy(cu_sorted_faces, this->faces.ptr, F * sizeof(int3), cudaMemcpyDeviceToDevice));
 
-    // 2. Sort vertices within each face (canonical form)
-    // (This ensures that face [0,1,2] is treated same as [2,0,1])
-    sort_faces_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(cu_sorted_faces, F);
+    // Sort vertices within each face (in the temporary copy)
+    sort_faces_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+        cu_sorted_faces,
+        F
+    );
     CUDA_CHECK(cudaGetLastError());
 
-    // 3. Create indices [0, 1, 2, ... F-1]
+#if defined(CUDART_VERSION) && (CUDART_VERSION < 12040)
+    // CUDA < 12.4: use Thrust implementation
     int *cu_sorted_face_indices;
     CUDA_CHECK(cudaMalloc(&cu_sorted_face_indices, F * sizeof(int)));
-    
-    // Use Thrust to generate sequence
-    thrust::sequence(thrust::device, 
-                     thrust::device_pointer_cast(cu_sorted_face_indices), 
+
+    thrust::sequence(thrust::device,
+                     thrust::device_pointer_cast(cu_sorted_face_indices),
                      thrust::device_pointer_cast(cu_sorted_face_indices + F));
 
-    // 4. Sort the INDICES based on the face values using Thrust
-    // This groups identical faces together in the index list
-    thrust::sort(thrust::device, 
-                 thrust::device_pointer_cast(cu_sorted_face_indices), 
-                 thrust::device_pointer_cast(cu_sorted_face_indices + F), 
+    thrust::sort(thrust::device,
+                 thrust::device_pointer_cast(cu_sorted_face_indices),
+                 thrust::device_pointer_cast(cu_sorted_face_indices + F),
                  FaceComparator(cu_sorted_faces));
 
-    // 5. Mark duplicates
-    // We traverse the sorted indices. If neighbors are equal, mark original index for removal.
     uint8_t* cu_face_mask_original;
     CUDA_CHECK(cudaMalloc(&cu_face_mask_original, F * sizeof(uint8_t)));
 
@@ -326,13 +325,67 @@ void CuMesh::remove_duplicate_faces() {
     );
     CUDA_CHECK(cudaGetLastError());
 
-    // 6. Cleanup temporary memory
     CUDA_CHECK(cudaFree(cu_sorted_faces));
     CUDA_CHECK(cudaFree(cu_sorted_face_indices));
 
-    // 7. Remove faces using the generated mask
     this->_remove_faces(cu_face_mask_original);
     CUDA_CHECK(cudaFree(cu_face_mask_original));
+#else
+    // CUDA >= 12.4: keep existing CUB behavior
+    size_t temp_storage_bytes = 0;
+    int *cu_sorted_face_indices;
+    CUDA_CHECK(cudaMalloc(&cu_sorted_face_indices, F * sizeof(int)));
+    arange_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(cu_sorted_face_indices, F);
+    CUDA_CHECK(cudaGetLastError());
+
+    int *cu_sorted_indices_output;
+    int3 *cu_sorted_faces_output;
+    CUDA_CHECK(cudaMalloc(&cu_sorted_indices_output, F * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&cu_sorted_faces_output, F * sizeof(int3)));
+
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+        nullptr, temp_storage_bytes,
+        cu_sorted_faces, cu_sorted_faces_output,
+        cu_sorted_face_indices, cu_sorted_indices_output,
+        F,
+        int3_decomposer{}
+    ));
+    this->cub_temp_storage.resize(temp_storage_bytes);
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+        this->cub_temp_storage.ptr, temp_storage_bytes,
+        cu_sorted_faces, cu_sorted_faces_output,
+        cu_sorted_face_indices, cu_sorted_indices_output,
+        F,
+        int3_decomposer{}
+    ));
+    CUDA_CHECK(cudaFree(cu_sorted_faces));
+    CUDA_CHECK(cudaFree(cu_sorted_face_indices));
+
+    uint8_t* cu_face_mask_sorted;
+    CUDA_CHECK(cudaMalloc(&cu_face_mask_sorted, F * sizeof(uint8_t)));
+    select_first_in_each_group_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+        cu_sorted_faces_output,
+        F,
+        cu_face_mask_sorted
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaFree(cu_sorted_faces_output));
+
+    uint8_t* cu_face_mask_original;
+    CUDA_CHECK(cudaMalloc(&cu_face_mask_original, F * sizeof(uint8_t)));
+    scatter_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+        cu_sorted_indices_output,
+        cu_face_mask_sorted,
+        F,
+        cu_face_mask_original
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaFree(cu_face_mask_sorted));
+    CUDA_CHECK(cudaFree(cu_sorted_indices_output));
+
+    this->_remove_faces(cu_face_mask_original);
+    CUDA_CHECK(cudaFree(cu_face_mask_original));
+#endif
 }
 
 static __global__ void mark_degenerate_faces_kernel(
