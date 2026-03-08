@@ -4,6 +4,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
 
 #define CUDA_CHECK(call)                                \
 do {                                                    \
@@ -43,7 +44,11 @@ struct Buffer {
     }
 
     void free() {
-        if (ptr != nullptr) CUDA_CHECK(cudaFree(ptr));
+        if (ptr != nullptr) {
+            cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            CUDA_CHECK(cudaFree(ptr));
+        }
         ptr = nullptr;
         size = 0;
         capacity = 0;
@@ -62,7 +67,9 @@ struct Buffer {
         if (new_size > capacity) {
             T* new_ptr;
             CUDA_CHECK(cudaMalloc(&new_ptr, new_size * sizeof(T)));
-            CUDA_CHECK(cudaMemcpy(new_ptr, ptr, this->size * sizeof(T), cudaMemcpyDeviceToDevice));
+            cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+            CUDA_CHECK(cudaMemcpyAsync(new_ptr, ptr, this->size * sizeof(T), cudaMemcpyDeviceToDevice, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
             CUDA_CHECK(cudaFree(ptr));
             ptr = new_ptr;
             this->capacity = new_size;
@@ -71,12 +78,15 @@ struct Buffer {
     }
 
     void zero() {
-        CUDA_CHECK(cudaMemset(ptr, 0, size * sizeof(T)));
+        cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+        CUDA_CHECK(cudaMemsetAsync(ptr, 0, size * sizeof(T), stream));
     }
 
     void fill(T val) {
+        cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
         std::vector<T> tmp(size, val);
-        CUDA_CHECK(cudaMemcpy(ptr, tmp.data(), size * sizeof(T), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(ptr, tmp.data(), size * sizeof(T), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
     }
 };
 

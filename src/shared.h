@@ -3,11 +3,16 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
+#include <c10/cuda/CUDAStream.h>
 #include "utils.h"
 #include "cumesh.h"
 
 
 namespace cumesh {
+
+inline cudaStream_t current_stream() {
+    return at::cuda::getCurrentCUDAStream().stream();
+}
 
 
 template<typename T>
@@ -158,33 +163,33 @@ __global__ void get_diff_kernel(
 
 template<typename T>
 int compress_ids(T* ids, size_t N, Buffer<char>& cub_temp_storage, T* inverse=nullptr) {
+    cudaStream_t stream = current_stream();
     int *cu_indices, *cu_indices_argsorted;
+    int *cu_num = nullptr;
     T *cu_ids_sorted;
     CUDA_CHECK(cudaMalloc(&cu_indices, N * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&cu_indices_argsorted, N * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&cu_ids_sorted, N * sizeof(T)));
-    arange_kernel<<<(N+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(cu_indices, N);
+    arange_kernel<<<(N+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(cu_indices, N);
     CUDA_CHECK(cudaGetLastError());
     size_t temp_storage_bytes = 0;
     CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
         nullptr, temp_storage_bytes,
         ids, cu_ids_sorted,
         cu_indices, cu_indices_argsorted,
-        N
+        N, 0, sizeof(T) * 8, stream
     ));
     cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
         cub_temp_storage.ptr, temp_storage_bytes,
         ids, cu_ids_sorted,
         cu_indices, cu_indices_argsorted,
-        N
+        N, 0, sizeof(T) * 8, stream
     ));
-    CUDA_CHECK(cudaFree(cu_indices));
-
     // get diff
     T* cu_new_ids;
     CUDA_CHECK(cudaMalloc(&cu_new_ids, N * sizeof(T)));
-    get_diff_kernel<<<(N+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+    get_diff_kernel<<<(N+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         cu_ids_sorted,
         cu_new_ids,
         N
@@ -193,40 +198,37 @@ int compress_ids(T* ids, size_t N, Buffer<char>& cub_temp_storage, T* inverse=nu
 
     // inverse
     if (inverse) {
-        int* cu_num;
         CUDA_CHECK(cudaMalloc(&cu_num, sizeof(int)));
         temp_storage_bytes = 0;
         CUDA_CHECK(cub::DeviceSelect::Flagged(
             nullptr, temp_storage_bytes,
             cu_ids_sorted, cu_new_ids, inverse, cu_num,
-            N
+            N, stream
         ));
         cub_temp_storage.resize(temp_storage_bytes);
         CUDA_CHECK(cub::DeviceSelect::Flagged(
             cub_temp_storage.ptr, temp_storage_bytes,
             cu_ids_sorted, cu_new_ids, inverse, cu_num,
-            N
+            N, stream
         ));
-        CUDA_CHECK(cudaFree(cu_num));
     }
-    CUDA_CHECK(cudaFree(cu_ids_sorted));
-    
+
     // scan diff
     temp_storage_bytes = 0;
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         nullptr, temp_storage_bytes,
         cu_new_ids,
-        N
+        N, stream
     ));
     cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         cub_temp_storage.ptr, temp_storage_bytes,
         cu_new_ids,
-        N
+        N, stream
     ));
-    
+
     // scatter
-    scatter_kernel<<<(N+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+    scatter_kernel<<<(N+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         cu_indices_argsorted,
         cu_new_ids,
         N,
@@ -234,10 +236,16 @@ int compress_ids(T* ids, size_t N, Buffer<char>& cub_temp_storage, T* inverse=nu
     );
     CUDA_CHECK(cudaGetLastError());
     T num_components;
-    CUDA_CHECK(cudaMemcpy(&num_components, cu_new_ids + N-1, sizeof(T), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(&num_components, cu_new_ids + N-1, sizeof(T), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     num_components += 1;
+
+    // Free all scratch memory — stream is synced, all GPU work is done
+    CUDA_CHECK(cudaFree(cu_indices));
+    CUDA_CHECK(cudaFree(cu_ids_sorted));
     CUDA_CHECK(cudaFree(cu_new_ids));
     CUDA_CHECK(cudaFree(cu_indices_argsorted));
+    if (cu_num) CUDA_CHECK(cudaFree(cu_num));
 
     return static_cast<int>(num_components);
 }
@@ -247,6 +255,7 @@ int compress_ids(T* ids, size_t N, Buffer<char>& cub_temp_storage, T* inverse=nu
 
 template <typename T>
 void print_max_val(T* ptr, size_t size) {
+    cudaStream_t stream = current_stream();
     T* dbg_cu_max_val;
     CUDA_CHECK(cudaMalloc(&dbg_cu_max_val, sizeof(T)));
     size_t temp_storage_bytes = 0;
@@ -254,7 +263,7 @@ void print_max_val(T* ptr, size_t size) {
         nullptr, temp_storage_bytes,
         ptr,
         dbg_cu_max_val,
-        size
+        size, stream
     ));
     char* temp_storage;
     CUDA_CHECK(cudaMalloc(&temp_storage, temp_storage_bytes));
@@ -262,10 +271,11 @@ void print_max_val(T* ptr, size_t size) {
         temp_storage, temp_storage_bytes,
         ptr,
         dbg_cu_max_val,
-        size
+        size, stream
     ));
     T h_max_val;
-    CUDA_CHECK(cudaMemcpy(&h_max_val, dbg_cu_max_val, sizeof(T), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(&h_max_val, dbg_cu_max_val, sizeof(T), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     std::cout << "Max value: " << h_max_val << std::endl;
     CUDA_CHECK(cudaFree(dbg_cu_max_val));
     CUDA_CHECK(cudaFree(temp_storage));
@@ -273,8 +283,10 @@ void print_max_val(T* ptr, size_t size) {
 
 template <typename T>
 void print_val(T* ptr, size_t size) {
+    cudaStream_t stream = current_stream();
     T h_ptr[size];
-    CUDA_CHECK(cudaMemcpy(h_ptr, ptr, size * sizeof(T), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(h_ptr, ptr, size * sizeof(T), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     for (size_t i = 0; i < size; i++) {
         std::cout << h_ptr[i] << " ";
     }

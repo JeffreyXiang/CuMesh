@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <c10/cuda/CUDAStream.h>
 
 #include "api.h"
 #include "hash.cuh"
@@ -32,9 +33,12 @@ static void dispatch_hashmap_insert_cuda(
     const torch::Tensor& keys,
     const torch::Tensor& values
 ) {
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
     hashmap_insert_cuda_kernel<<<
         (keys.size(0) + BLOCK_SIZE - 1) / BLOCK_SIZE,
-        BLOCK_SIZE
+        BLOCK_SIZE,
+        0,
+        stream
     >>>(
         hashmap_keys.size(0),
         keys.size(0),
@@ -111,9 +115,12 @@ static void dispatch_hashmap_lookup_cuda(
     const torch::Tensor& keys,
     torch::Tensor& values
 ) {
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
     hashmap_lookup_cuda_kernel<<<
         (keys.size(0) + BLOCK_SIZE - 1) / BLOCK_SIZE,
-        BLOCK_SIZE
+        BLOCK_SIZE,
+        0,
+        stream
     >>>(
         hashmap_keys.size(0),
         keys.size(0),
@@ -205,9 +212,12 @@ static void dispatch_hashmap_insert_3d_cuda(
     const torch::Tensor& values,
     int W, int H, int D
 ) {
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
     hashmap_insert_3d_cuda_kernel<<<
         (coords.size(0) + BLOCK_SIZE - 1) / BLOCK_SIZE,
-        BLOCK_SIZE
+        BLOCK_SIZE,
+        0,
+        stream
     >>>(
         hashmap_keys.size(0),
         coords.size(0),
@@ -303,9 +313,12 @@ static void dispatch_hashmap_lookup_3d_cuda(
     torch::Tensor& values,
     int W, int H, int D
 ) {
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
     hashmap_lookup_3d_cuda_kernel<<<
         (coords.size(0) + BLOCK_SIZE - 1) / BLOCK_SIZE,
-        BLOCK_SIZE
+        BLOCK_SIZE,
+        0,
+        stream
     >>>(
         hashmap_keys.size(0),
         coords.size(0),
@@ -395,9 +408,12 @@ static void dispatch_hashmap_insert_3d_idx_as_val_cuda(
     const torch::Tensor& coords,
     int W, int H, int D
 ) {
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
     hashmap_insert_3d_idx_as_val_cuda_kernel<<<
         (coords.size(0) + BLOCK_SIZE - 1) / BLOCK_SIZE,
-        BLOCK_SIZE
+        BLOCK_SIZE,
+        0,
+        stream
     >>>(
         hashmap_keys.size(0),
         coords.size(0),
