@@ -24,9 +24,10 @@ static __global__ void compute_face_areas_kernel(
 
 
 void CuMesh::compute_face_areas() {
+    cudaStream_t stream = current_stream();
     size_t F = this->faces.size;
     this->face_areas.resize(F);
-    compute_face_areas_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    compute_face_areas_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         this->vertices.ptr,
         this->faces.ptr,
         F,
@@ -57,9 +58,10 @@ static __global__ void compute_face_normals_kernel(
 
 
 void CuMesh::compute_face_normals() {
+    cudaStream_t stream = current_stream();
     size_t F = this->faces.size;
     this->face_normals.resize(F);
-    compute_face_normals_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    compute_face_normals_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         this->vertices.ptr,
         this->faces.ptr,
         F,
@@ -113,9 +115,10 @@ void CuMesh::compute_vertex_normals() {
         this->get_vertex_face_adjacency();
     }
 
+    cudaStream_t stream = current_stream();
     size_t V = this->vertices.size;
     this->vertex_normals.resize(V);
-    compute_vertex_normals_kernel<<<(V + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    compute_vertex_normals_kernel<<<(V + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         this->vertices.ptr,
         this->faces.ptr,
         this->vert2face.ptr,

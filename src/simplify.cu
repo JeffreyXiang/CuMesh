@@ -1,6 +1,8 @@
 #include "cumesh.h"
 #include "dtypes.cuh"
 #include <cub/cub.cuh>
+#include <c10/cuda/CUDAStream.h>
+#include "shared.h"
 
 
 namespace cumesh {
@@ -21,7 +23,7 @@ __device__ inline void unpack_key_value_positive(uint64_t key_value, int& key, f
 
 /**
  * Get the QEM for each vertex
- * 
+ *
  * @param vertices: the vertices of the mesh, shape (V)
  * @param faces: the faces of the mesh, shape (F)
  * @param vert2face: the buffer for neighbor face ids, shape (total_neighbor_face_cnt)
@@ -64,12 +66,13 @@ static __global__ void get_qem_kernel(
  * Get the QEM for each vertex
  */
 void get_qem(
-    CuMesh& ctx
+    CuMesh& ctx,
+    cudaStream_t stream
 ) {
     size_t V = ctx.vertices.size;
     size_t F = ctx.faces.size;
     ctx.temp_storage.resize(V * sizeof(QEM));
-    get_qem_kernel<<<(V+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+    get_qem_kernel<<<(V+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         ctx.vertices.ptr,
         ctx.faces.ptr,
         ctx.vert2face.ptr,
@@ -139,7 +142,7 @@ inline __device__ bool process_incident_tri(
 
 /**
  * Get the cost for each edge collapse
- * 
+ *
  * @param vertices: the vertices of the mesh, shape (V)
  * @param faces: the faces of the mesh, shape (F)
  * @param vert2face: the buffer for neighbor face ids, shape (total_neighbor_face_cnt)
@@ -228,13 +231,14 @@ static __global__ void get_edge_collapse_cost_kernel(
 void get_edge_collapse_cost(
     CuMesh& ctx,
     float lambda_edge_length,
-    float lambda_skinny
+    float lambda_skinny,
+    cudaStream_t stream
 ) {
     size_t V = ctx.vertices.size;
     size_t F = ctx.faces.size;
     size_t E = ctx.edges.size;
     ctx.edge_collapse_costs.resize(E);
-    get_edge_collapse_cost_kernel<<<(E+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+    get_edge_collapse_cost_kernel<<<(E+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         ctx.vertices.ptr,
         ctx.faces.ptr,
         ctx.vert2face.ptr,
@@ -252,7 +256,7 @@ void get_edge_collapse_cost(
 
 /**
  * Propagate cost to neighboring faces
- * 
+ *
  * @param edges: the buffer for edges, shape (E)
  * @param vert2face: the buffer for neighboring face ids, shape (total_neighbor_face_cnt)
  * @param vert2face_offset: the buffer for neighboring face ids offset, shape (V+1)
@@ -296,14 +300,15 @@ static __global__ void propagate_cost_kernel(
  * Propagate cost to neighboring faces
  */
 void propagate_cost(
-    CuMesh& ctx
+    CuMesh& ctx,
+    cudaStream_t stream
 ) {
     size_t V = ctx.vertices.size;
     size_t F = ctx.faces.size;
     size_t E = ctx.edges.size;
     ctx.propagated_costs.resize(F);
     ctx.propagated_costs.fill(std::numeric_limits<uint64_t>::max());
-    propagate_cost_kernel<<<(E+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+    propagate_cost_kernel<<<(E+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         ctx.edges.ptr,
         ctx.vert2face.ptr,
         ctx.vert2face_offset.ptr,
@@ -317,7 +322,7 @@ void propagate_cost(
 
 /**
  * Collapse edges parallelly
- * 
+ *
  * @param vertices: the vertices of the mesh, shape (V)
  * @param faces: the faces of the mesh, shape (F)
  * @param edges: the buffer for edges, shape (E)
@@ -433,7 +438,7 @@ static __global__ void compress_faces_kernel(
     if (is_kept) {
         new_faces[new_id].x = vertices_map[old_faces[tid].x];
         new_faces[new_id].y = vertices_map[old_faces[tid].y];
-        new_faces[new_id].z = vertices_map[old_faces[tid].z];        
+        new_faces[new_id].z = vertices_map[old_faces[tid].z];
     }
 }
 
@@ -443,7 +448,8 @@ static __global__ void compress_faces_kernel(
  */
 void collapse_edges(
     CuMesh& ctx,
-    float collapse_thresh
+    float collapse_thresh,
+    cudaStream_t stream
 ) {
     size_t V = ctx.vertices.size;
     size_t F = ctx.faces.size;
@@ -452,7 +458,7 @@ void collapse_edges(
     ctx.faces_map.resize(F + 1);
     ctx.vertices_map.fill(1);
     ctx.faces_map.fill(1);
-    collapse_edges_kernel<<<(E+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+    collapse_edges_kernel<<<(E+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         ctx.vertices.ptr,
         ctx.faces.ptr,
         ctx.edges.ptr,
@@ -467,24 +473,25 @@ void collapse_edges(
         ctx.faces_map.ptr
     );
     CUDA_CHECK(cudaGetLastError());
-    
+
     // update vertices buffer
     // get vertices map
     size_t temp_storage_bytes = 0;
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         nullptr, temp_storage_bytes,
-        ctx.vertices_map.ptr, V+1
+        ctx.vertices_map.ptr, V+1, stream
     ));
     ctx.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         ctx.cub_temp_storage.ptr, temp_storage_bytes,
-        ctx.vertices_map.ptr, V+1
+        ctx.vertices_map.ptr, V+1, stream
     ));
     int new_num_vertices;
-    CUDA_CHECK(cudaMemcpy(&new_num_vertices, ctx.vertices_map.ptr + V, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(&new_num_vertices, ctx.vertices_map.ptr + V, sizeof(int), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     // compress vertices
     ctx.temp_storage.resize(new_num_vertices * sizeof(float3));
-    compress_vertices_kernel<<<(V+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+    compress_vertices_kernel<<<(V+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         ctx.vertices_map.ptr,
         ctx.vertices.ptr,
         V,
@@ -497,18 +504,19 @@ void collapse_edges(
     // get faces map
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         nullptr, temp_storage_bytes,
-        ctx.faces_map.ptr, F+1
+        ctx.faces_map.ptr, F+1, stream
     ));
     ctx.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         ctx.cub_temp_storage.ptr, temp_storage_bytes,
-        ctx.faces_map.ptr, F+1
+        ctx.faces_map.ptr, F+1, stream
     ));
     int new_num_faces;
-    CUDA_CHECK(cudaMemcpy(&new_num_faces, ctx.faces_map.ptr + F, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(&new_num_faces, ctx.faces_map.ptr + F, sizeof(int), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     // compress faces
     ctx.temp_storage.resize(new_num_faces * sizeof(int3));
-    compress_faces_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+    compress_faces_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         ctx.faces_map.ptr,
         ctx.vertices_map.ptr,
         ctx.faces.ptr,
@@ -521,12 +529,13 @@ void collapse_edges(
 
 
 std::tuple<int, int> CuMesh::simplify_step(float lambda_edge_length, float lambda_skinny, float threshold, bool timing) {
+    cudaStream_t stream = current_stream();
     std::chrono::high_resolution_clock::time_point start, end;
 
     if (timing) start = std::chrono::high_resolution_clock::now();
     this->get_vertex_face_adjacency();
     if (timing) {
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         end = std::chrono::high_resolution_clock::now();
         std::cout << "get_vertex_face_adjacency: " << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() << " us" << std::endl;
     }
@@ -535,39 +544,39 @@ std::tuple<int, int> CuMesh::simplify_step(float lambda_edge_length, float lambd
     this->get_edges();
     this->get_boundary_info();
     if (timing) {
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         end = std::chrono::high_resolution_clock::now();
         std::cout << "get_edges: " << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() << " us" << std::endl;
     }
 
     if (timing) start = std::chrono::high_resolution_clock::now();
-    get_qem(*this);
+    get_qem(*this, stream);
     if (timing) {
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         end = std::chrono::high_resolution_clock::now();
         std::cout << "get_qem: " << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() << " us" << std::endl;
     }
 
     if (timing) start = std::chrono::high_resolution_clock::now();
-    get_edge_collapse_cost(*this, lambda_edge_length, lambda_skinny);
+    get_edge_collapse_cost(*this, lambda_edge_length, lambda_skinny, stream);
     if (timing) {
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         end = std::chrono::high_resolution_clock::now();
         std::cout << "get_edge_collapse_cost: " << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() << " us" << std::endl;
     }
 
     if (timing) start = std::chrono::high_resolution_clock::now();
-    propagate_cost(*this);
+    propagate_cost(*this, stream);
     if (timing) {
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         end = std::chrono::high_resolution_clock::now();
         std::cout << "propagate_cost: " << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() << " us" << std::endl;
     }
 
     if (timing) start = std::chrono::high_resolution_clock::now();
-    collapse_edges(*this, threshold);
+    collapse_edges(*this, threshold, stream);
     if (timing) {
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         end = std::chrono::high_resolution_clock::now();
         std::cout << "collapse_edges: " << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() << " us" << std::endl;
     }

@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <c10/cuda/CUDAStream.h>
 #include <vector>
 
 #include "api.h"
@@ -181,6 +182,7 @@ std::tuple<torch::Tensor, torch::Tensor> cumesh::simple_dual_contour(
 ) {
     const size_t M = coords.size(0);
     const size_t N_vert = hashmap_keys.size(0);
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
     auto vertices = torch::empty({(long)M, 3}, torch::dtype(torch::kFloat32).device(coords.device()));
     auto intersected = torch::empty({(long)M, 3}, torch::dtype(torch::kInt32).device(coords.device()));
@@ -189,7 +191,7 @@ std::tuple<torch::Tensor, torch::Tensor> cumesh::simple_dual_contour(
     dim3 blocks((M + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
     if (hashmap_keys.dtype() == torch::kUInt32) {
-        simple_dual_contour_kernel<<<blocks, threads>>>(
+        simple_dual_contour_kernel<<<blocks, threads, 0, stream>>>(
             N_vert,
             M,
             W, H, D,
@@ -200,9 +202,9 @@ std::tuple<torch::Tensor, torch::Tensor> cumesh::simple_dual_contour(
             vertices.data_ptr<float>(),
             intersected.data_ptr<int32_t>()
         );
-    } 
+    }
     else if (hashmap_keys.dtype() == torch::kUInt64) {
-        simple_dual_contour_kernel<<<blocks, threads>>>(
+        simple_dual_contour_kernel<<<blocks, threads, 0, stream>>>(
             N_vert,
             M,
             W, H, D,
@@ -213,7 +215,7 @@ std::tuple<torch::Tensor, torch::Tensor> cumesh::simple_dual_contour(
             vertices.data_ptr<float>(),
             intersected.data_ptr<int32_t>()
         );
-    } 
+    }
     else {
         TORCH_CHECK(false, "Unsupported hashmap data type");
     }

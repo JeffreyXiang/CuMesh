@@ -2,6 +2,7 @@
 #include "dtypes.cuh"
 #include "shared.h"
 #include <cub/cub.cuh>
+#include <c10/cuda/CUDAStream.h>
 
 
 namespace cumesh {
@@ -39,7 +40,7 @@ __device__ inline void unpack_key_value_positive(uint64_t key_value, int& key, f
 // ) {
 //     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
 //     if (tid >= F) return;
-// 
+//
 //     float3 n = face_normals[tid];
 //     chart_normal_cones[tid] = make_float4(n.x, n.y, n.z, 0.0f); // half angle = 0
 // }
@@ -59,7 +60,7 @@ static __global__ void init_chart_adj_kernel(
 
     int f0 = face_adj[tid].x;
     int f1 = face_adj[tid].y;
-    
+
     int c0 = chart_ids[f0];
     int c1 = chart_ids[f1];
 
@@ -77,7 +78,7 @@ static __global__ void init_chart_adj_kernel(
     int3 tri1 = faces[f1];
 
     int t0_indices[3] = {tri0.x, tri0.y, tri0.z};
-    int common_v_indices[2]; 
+    int common_v_indices[2];
     int found_count = 0;
 
     #pragma unroll
@@ -277,7 +278,8 @@ static __global__ void collapse_edges_kernel(
 
 
 static void get_chart_connectivity(
-    CuMesh& mesh
+    CuMesh& mesh,
+    cudaStream_t stream
 ) {
     size_t M = mesh.manifold_face_adj.size;
 
@@ -289,7 +291,7 @@ static void get_chart_connectivity(
     CUDA_CHECK(cudaMalloc(&cu_raw_lengths, M * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&cu_sorted_lengths, M * sizeof(float)));
 
-    init_chart_adj_kernel<<<(M + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    init_chart_adj_kernel<<<(M + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         mesh.vertices.ptr,
         mesh.faces.ptr,
         mesh.manifold_face_adj.ptr,
@@ -309,7 +311,7 @@ static void get_chart_connectivity(
         reinterpret_cast<uint64_t*>(mesh.temp_storage.ptr),
         cu_raw_lengths,
         cu_sorted_lengths,
-        M
+        M, 0, sizeof(uint64_t) * 8, stream
     ));
     mesh.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
@@ -318,16 +320,15 @@ static void get_chart_connectivity(
         reinterpret_cast<uint64_t*>(mesh.temp_storage.ptr),
         cu_raw_lengths,
         cu_sorted_lengths,
-        M
+        M, 0, sizeof(uint64_t) * 8, stream
     ));
-    CUDA_CHECK(cudaFree(cu_raw_lengths));
-	
+
     #if CUDART_VERSION >= 12090
         auto reduce_op = ::cuda::std::plus();
     #else
         auto reduce_op = cub::Sum();
     #endif
-	
+
 
     // 1.3 Reduce By Key (Aggregate duplicate chart pairs by summing lengths)
     int* cu_num_chart_adjs;
@@ -340,8 +341,8 @@ static void get_chart_connectivity(
         cu_sorted_lengths,
         mesh.atlas_chart_adj_length.ptr,
         cu_num_chart_adjs,
-		reduce_op,
-        M
+        reduce_op,
+        M, stream
     ));
     mesh.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceReduce::ReduceByKey(
@@ -351,19 +352,22 @@ static void get_chart_connectivity(
         cu_sorted_lengths,
         mesh.atlas_chart_adj_length.ptr,
         cu_num_chart_adjs,
-		reduce_op,
-        M
+        reduce_op,
+        M, stream
     ));
-    CUDA_CHECK(cudaMemcpy(&mesh.atlas_chart_adj.size, cu_num_chart_adjs, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(&mesh.atlas_chart_adj.size, cu_num_chart_adjs, sizeof(int), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     mesh.atlas_chart_adj_length.size = mesh.atlas_chart_adj.size;
+    CUDA_CHECK(cudaFree(cu_raw_lengths));
     CUDA_CHECK(cudaFree(cu_sorted_lengths));
     CUDA_CHECK(cudaFree(cu_num_chart_adjs));
     // Remove invalid edge (UINT64_MAX) if present
     // Since we sorted, invalid edges are at the end.
     uint64_t last_key;
     if (mesh.atlas_chart_adj.size > 0) {
-        CUDA_CHECK(cudaMemcpy(&last_key, mesh.atlas_chart_adj.ptr + mesh.atlas_chart_adj.size - 1, sizeof(uint64_t), cudaMemcpyDeviceToHost));
-        if (last_key == UINT64_MAX) { 
+        CUDA_CHECK(cudaMemcpyAsync(&last_key, mesh.atlas_chart_adj.ptr + mesh.atlas_chart_adj.size - 1, sizeof(uint64_t), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (last_key == UINT64_MAX) {
             mesh.atlas_chart_adj.size -= 1;
             mesh.atlas_chart_adj_length.size -= 1;
         }
@@ -381,7 +385,7 @@ static void get_chart_connectivity(
     mesh.atlas_chart2edge_cnt.zero();
     mesh.atlas_chart_perims.resize(C);
     mesh.atlas_chart_perims.zero();
-    get_chart_edge_cnt_kernel<<<(E + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    get_chart_edge_cnt_kernel<<<(E + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         mesh.atlas_chart_adj.ptr,
         mesh.atlas_chart_adj_length.ptr,
         E,
@@ -396,19 +400,19 @@ static void get_chart_connectivity(
         nullptr, temp_storage_bytes,
         mesh.atlas_chart2edge_cnt.ptr,
         mesh.atlas_chart2edge_offset.ptr,
-        C + 1
+        C + 1, stream
     ));
     mesh.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         mesh.cub_temp_storage.ptr, temp_storage_bytes,
         mesh.atlas_chart2edge_cnt.ptr,
         mesh.atlas_chart2edge_offset.ptr,
-        C + 1
+        C + 1, stream
     ));
     // 2.3 Fill CSR format for chart-edge connectivity
     mesh.atlas_chart2edge.resize(2 * E); // each edge connects two charts
     mesh.atlas_chart2edge_cnt.zero();
-    get_chart_edge_adjacency_kernel<<<(E + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    get_chart_edge_adjacency_kernel<<<(E + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         mesh.atlas_chart_adj.ptr,
         E,
         mesh.atlas_chart2edge.ptr,
@@ -480,7 +484,8 @@ static __global__ void update_normal_cones_kernel(
 
 
 void compute_chart_normal_cones(
-    CuMesh& mesh
+    CuMesh& mesh,
+    cudaStream_t stream
 ) {
     size_t C = mesh.atlas_num_charts;
     size_t F = mesh.faces.size;
@@ -492,7 +497,7 @@ void compute_chart_normal_cones(
     CUDA_CHECK(cudaMalloc(&sorted_chart_ids, F * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&faces_ids, F * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&argsorted_faces_ids, F * sizeof(int)));
-    arange_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    arange_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         faces_ids,
         F
     );
@@ -502,17 +507,18 @@ void compute_chart_normal_cones(
         nullptr, temp_storage_bytes,
         mesh.atlas_chart_ids.ptr, sorted_chart_ids,
         faces_ids, argsorted_faces_ids,
-        F
+        F, 0, sizeof(int) * 8, stream
     ));
     mesh.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
         mesh.cub_temp_storage.ptr, temp_storage_bytes,
         mesh.atlas_chart_ids.ptr, sorted_chart_ids,
         faces_ids, argsorted_faces_ids,
-        F
+        F, 0, sizeof(int) * 8, stream
     ));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(faces_ids));
-    
+
     // 2. Get CSR format for chart-face assignment
     int* cu_chart_size;
     int* cu_num_charts;
@@ -523,14 +529,15 @@ void compute_chart_normal_cones(
     CUDA_CHECK(cub::DeviceRunLengthEncode::Encode(
         nullptr, temp_storage_bytes,
         sorted_chart_ids, cu_unique_chart_ids, cu_chart_size, cu_num_charts,
-        F
+        F, stream
     ));
     mesh.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceRunLengthEncode::Encode(
         mesh.cub_temp_storage.ptr, temp_storage_bytes,
         sorted_chart_ids, cu_unique_chart_ids, cu_chart_size, cu_num_charts,
-        F
+        F, stream
     ));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(cu_num_charts));
     CUDA_CHECK(cudaFree(cu_unique_chart_ids));
 
@@ -540,20 +547,21 @@ void compute_chart_normal_cones(
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         nullptr, temp_storage_bytes,
         cu_chart_size, cu_chart_offsets,
-        C + 1
+        C + 1, stream
     ));
     mesh.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         mesh.cub_temp_storage.ptr, temp_storage_bytes,
         cu_chart_size, cu_chart_offsets,
-        C + 1
+        C + 1, stream
     ));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(cu_chart_size));
 
     // 3. Compute chart normals and areas
     float* cu_sorted_face_areas;
     CUDA_CHECK(cudaMalloc(&cu_sorted_face_areas, F * sizeof(float)));
-    index_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    index_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         mesh.face_areas.ptr,
         argsorted_faces_ids,
         F,
@@ -565,26 +573,30 @@ void compute_chart_normal_cones(
         nullptr, temp_storage_bytes,
         cu_sorted_face_areas, mesh.atlas_chart_areas.ptr,
         C,
-        cu_chart_offsets, cu_chart_offsets + 1
+        cu_chart_offsets, cu_chart_offsets + 1,
+        stream
     ));
     mesh.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(
         mesh.cub_temp_storage.ptr, temp_storage_bytes,
         cu_sorted_face_areas, mesh.atlas_chart_areas.ptr,
         C,
-        cu_chart_offsets, cu_chart_offsets + 1
+        cu_chart_offsets, cu_chart_offsets + 1,
+        stream
     ));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(cu_sorted_face_areas));
 
     float3* cu_sorted_face_normals;
     CUDA_CHECK(cudaMalloc(&cu_sorted_face_normals, F * sizeof(float3)));
-    index_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    index_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         mesh.face_normals.ptr,
         argsorted_faces_ids,
         F,
         cu_sorted_face_normals
     );
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(argsorted_faces_ids));
     float3* cu_chart_normals;
     CUDA_CHECK(cudaMalloc(&cu_chart_normals, C * sizeof(float3)));
@@ -594,7 +606,8 @@ void compute_chart_normal_cones(
         C,
         cu_chart_offsets, cu_chart_offsets + 1,
         Float3Add(),
-        make_float3(0.0f, 0.0f, 0.0f)
+        make_float3(0.0f, 0.0f, 0.0f),
+        stream
     ));
     mesh.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceSegmentedReduce::Reduce(
@@ -603,9 +616,10 @@ void compute_chart_normal_cones(
         C,
         cu_chart_offsets, cu_chart_offsets + 1,
         Float3Add(),
-        make_float3(0.0f, 0.0f, 0.0f)
+        make_float3(0.0f, 0.0f, 0.0f),
+        stream
     ));
-    normalize_kernel<<<(C + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    normalize_kernel<<<(C + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         cu_chart_normals,
         C
     );
@@ -614,7 +628,7 @@ void compute_chart_normal_cones(
     // 4. Compute normal difference
     float* cu_normal_diff;
     CUDA_CHECK(cudaMalloc(&cu_normal_diff, F * sizeof(float)));
-    normal_diff_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    normal_diff_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         cu_chart_normals,
         cu_sorted_face_normals,
         sorted_chart_ids,
@@ -622,6 +636,7 @@ void compute_chart_normal_cones(
         cu_normal_diff
     );
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(cu_sorted_face_normals));
     CUDA_CHECK(cudaFree(sorted_chart_ids));
 
@@ -633,27 +648,31 @@ void compute_chart_normal_cones(
         nullptr, temp_storage_bytes,
         cu_normal_diff, cu_new_cone_half_angles,
         C,
-        cu_chart_offsets, cu_chart_offsets + 1
+        cu_chart_offsets, cu_chart_offsets + 1,
+        stream
     ));
     mesh.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceSegmentedReduce::Max(
         mesh.cub_temp_storage.ptr, temp_storage_bytes,
         cu_normal_diff, cu_new_cone_half_angles,
         C,
-        cu_chart_offsets, cu_chart_offsets + 1
+        cu_chart_offsets, cu_chart_offsets + 1,
+        stream
     ));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(cu_chart_offsets));
     CUDA_CHECK(cudaFree(cu_normal_diff));
 
     // 6. Update chart normal cones
     mesh.atlas_chart_normal_cones.resize(C);
-    update_normal_cones_kernel<<<(C + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    update_normal_cones_kernel<<<(C + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         mesh.atlas_chart_normal_cones.ptr,
         cu_chart_normals,
         cu_new_cone_half_angles,
         C
     );
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(cu_chart_normals));
     CUDA_CHECK(cudaFree(cu_new_cone_half_angles));
 }
@@ -677,7 +696,7 @@ static __global__ void refine_charts_kernel(
 
     // 1. Load current face data
     int current_c = chart_ids[fid];
-    Vec3f n(face_normals[fid]); 
+    Vec3f n(face_normals[fid]);
 
     // local register cache for candidate list (triangle has at most 3 neighbors, plus self, max 4 candidates)
     int candidates[4];
@@ -691,7 +710,7 @@ static __global__ void refine_charts_kernel(
 
     // 2. Iterate over 3 edges to aggregate smooth scores
     int eids[3] = { face2edge[fid].x, face2edge[fid].y, face2edge[fid].z };
-    
+
     #pragma unroll
     for (int i = 0; i < 3; i++) {
         int eid = eids[i];
@@ -740,7 +759,7 @@ static __global__ void refine_charts_kernel(
 
     for (int i = 0; i < num_candidates; ++i) {
         int c = candidates[i];
-        
+
         // A. Geom score
         float4 cone = chart_normal_cones[c];
         Vec3f axis(cone.x, cone.y, cone.z);
@@ -769,7 +788,7 @@ static __global__ void refine_charts_kernel(
             // new best is significantly better than current best
             best_total_score = total_score;
             best_c = c;
-        } 
+        }
         else if (abs(diff) <= epsilon) {
             // scores are very close, break tie by choosing smaller ID
             if (c < best_c) {
@@ -822,13 +841,14 @@ __global__ void hook_edges_if_same_chart_kernel(
 
 
 static void reassign_chart_ids(
-    CuMesh& mesh
+    CuMesh& mesh,
+    cudaStream_t stream
 ) {
     size_t F = mesh.faces.size;
     size_t M = mesh.manifold_face_adj.size;
 
     mesh.temp_storage.resize(F * sizeof(int));        // Use as parent for DSU
-    arange_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    arange_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         reinterpret_cast<int*>(mesh.temp_storage.ptr),
         F
     );
@@ -838,10 +858,11 @@ static void reassign_chart_ids(
     CUDA_CHECK(cudaMalloc(&cu_end_flag, sizeof(int)));
     do {
         h_end_flag = 1;
-        CUDA_CHECK(cudaMemcpy(cu_end_flag, &h_end_flag, sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(cu_end_flag, &h_end_flag, sizeof(int), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
 
         // Hook
-        hook_edges_if_same_chart_kernel<<<(M+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+        hook_edges_if_same_chart_kernel<<<(M+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
             mesh.manifold_face_adj.ptr,
             mesh.atlas_chart_ids.ptr,
             M,
@@ -851,15 +872,16 @@ static void reassign_chart_ids(
         CUDA_CHECK(cudaGetLastError());
 
         // Compress
-        compress_components_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(
+        compress_components_kernel<<<(F+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<int*>(mesh.temp_storage.ptr),
             F
         );
         CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaMemcpy(&h_end_flag, cu_end_flag, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(&h_end_flag, cu_end_flag, sizeof(int), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
     } while (h_end_flag == 0);
     CUDA_CHECK(cudaFree(cu_end_flag));
-    
+
     swap_buffers(mesh.atlas_chart_ids, mesh.temp_storage);
     mesh.atlas_num_charts = compress_ids(mesh.atlas_chart_ids.ptr, F, mesh.cub_temp_storage);
 }
@@ -930,7 +952,8 @@ static __global__ void unpack_vertex_ids_kernel(
 
 
 void construct_chart_mesh(
-    CuMesh& mesh
+    CuMesh& mesh,
+    cudaStream_t stream
 ) {
     size_t F = mesh.faces.size;
 
@@ -943,7 +966,7 @@ void construct_chart_mesh(
     CUDA_CHECK(cudaMalloc(&cu_sorted_chart_ids, F * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&cu_face_idx, F * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&cu_sorted_face_idx, F * sizeof(int)));
-    arange_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    arange_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         cu_face_idx,
         F
     );
@@ -953,15 +976,16 @@ void construct_chart_mesh(
         nullptr, temp_storage_bytes,
         mesh.atlas_chart_ids.ptr, cu_sorted_chart_ids,
         cu_face_idx, cu_sorted_face_idx,
-        F
+        F, 0, sizeof(int) * 8, stream
     ));
     mesh.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
         mesh.cub_temp_storage.ptr, temp_storage_bytes,
         mesh.atlas_chart_ids.ptr, cu_sorted_chart_ids,
         cu_face_idx, cu_sorted_face_idx,
-        F
+        F, 0, sizeof(int) * 8, stream
     ));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(cu_face_idx));
     // 2. RLE for chart size
     int* cu_chart_size;
@@ -974,14 +998,15 @@ void construct_chart_mesh(
     CUDA_CHECK(cub::DeviceRunLengthEncode::Encode(
         nullptr, temp_storage_bytes,
         cu_sorted_chart_ids, cu_unique_chart_ids, cu_chart_size, cu_num_chart,
-        F
+        F, stream
     ));
     mesh.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceRunLengthEncode::Encode(
         mesh.cub_temp_storage.ptr, temp_storage_bytes,
         cu_sorted_chart_ids, cu_unique_chart_ids, cu_chart_size, cu_num_chart,
-        F
+        F, stream
     ));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(cu_unique_chart_ids));
     CUDA_CHECK(cudaFree(cu_num_chart));
     // 3. Exclusive scan for chart face offset
@@ -989,19 +1014,20 @@ void construct_chart_mesh(
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         nullptr, temp_storage_bytes,
         cu_chart_size, mesh.atlas_chart_faces_offset.ptr,
-        mesh.atlas_num_charts + 1
+        mesh.atlas_num_charts + 1, stream
     ));
     mesh.cub_temp_storage.resize(temp_storage_bytes);
     CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
         mesh.cub_temp_storage.ptr, temp_storage_bytes,
         cu_chart_size, mesh.atlas_chart_faces_offset.ptr,
-        mesh.atlas_num_charts + 1
+        mesh.atlas_num_charts + 1, stream
     ));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(cu_chart_size));
     // 4. Expand chart ids and vertex ids
     uint64_t* cu_pack;
     CUDA_CHECK(cudaMalloc(&cu_pack, 3 * F * sizeof(uint64_t)));
-    expand_chart_ids_and_vertex_ids_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    expand_chart_ids_and_vertex_ids_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         cu_sorted_chart_ids,
         cu_sorted_face_idx,
         mesh.faces.ptr,
@@ -1009,6 +1035,7 @@ void construct_chart_mesh(
         cu_pack
     );
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(cu_sorted_chart_ids));
     CUDA_CHECK(cudaFree(cu_sorted_face_idx));
     // 5. Compress pair to construct all maps
@@ -1022,32 +1049,35 @@ void construct_chart_mesh(
     );
     mesh.atlas_chart_vertex_map.resize(new_num_vertices);
     mesh.atlas_chart_vertex_offset.resize(mesh.atlas_num_charts + 1);
-    unpack_vertex_ids_kernel<<<(new_num_vertices + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    unpack_vertex_ids_kernel<<<(new_num_vertices + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         cu_inverse_pack,
         new_num_vertices,
         mesh.atlas_chart_vertex_map.ptr,
         mesh.atlas_chart_vertex_offset.ptr
     );
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaFree(cu_inverse_pack));
-    unpack_faces_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    unpack_faces_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         cu_pack,
         F,
         mesh.atlas_chart_faces.ptr
     );
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    CUDA_CHECK(cudaFree(cu_inverse_pack));
     CUDA_CHECK(cudaFree(cu_pack));
 }
 
 
 void CuMesh::compute_charts(
-    float threshold_cone_half_angle_rad, 
-    int refine_iterations, 
-    int global_iterations, 
+    float threshold_cone_half_angle_rad,
+    int refine_iterations,
+    int global_iterations,
     float smooth_strength,
     float area_penalty_weight,
     float perimeter_area_ratio_weight
 ) {
+    cudaStream_t stream = current_stream();
+
     if (this->manifold_face_adj.is_empty()) {
         this->get_manifold_face_adjacency();
     }
@@ -1062,7 +1092,7 @@ void CuMesh::compute_charts(
     size_t F = this->faces.size;
     this->atlas_chart_ids.resize(F);
     this->atlas_num_charts = F;
-    arange_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+    arange_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
         this->atlas_chart_ids.ptr,
         F
     );
@@ -1074,19 +1104,20 @@ void CuMesh::compute_charts(
     for (int i = 0; i < global_iterations; i++) {
         while (true) {
             h_end_flag = 1;
-            CUDA_CHECK(cudaMemcpy(cu_end_flag, &h_end_flag, sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(cu_end_flag, &h_end_flag, sizeof(int), cudaMemcpyHostToDevice, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
 
             // 1. Compute chart connectivity
-            get_chart_connectivity(*this);
+            get_chart_connectivity(*this, stream);
             if (this->atlas_chart_adj.size == 0) break;
 
             // 2. Compute normal cones
-            compute_chart_normal_cones(*this);
+            compute_chart_normal_cones(*this, stream);
 
             // 3. Compute chart adjacency cost
             size_t E = this->atlas_chart_adj.size;
             this->edge_collapse_costs.resize(E);
-            compute_chart_adjacency_cost_kernel<<<(E + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+            compute_chart_adjacency_cost_kernel<<<(E + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
                 this->atlas_chart_adj.ptr,
                 this->atlas_chart_normal_cones.ptr,
                 this->atlas_chart_adj_length.ptr,
@@ -1097,27 +1128,27 @@ void CuMesh::compute_charts(
                 E,
                 this->edge_collapse_costs.ptr
             );
-            CUDA_CHECK(cudaGetLastError());CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaGetLastError());
 
             // 4. Propagate costs
             size_t C = this->atlas_num_charts;
             this->propagated_costs.resize(C);
-            propagate_cost_kernel<<<(C + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+            propagate_cost_kernel<<<(C + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
                 this->atlas_chart2edge.ptr,
                 this->atlas_chart2edge_offset.ptr,
                 this->edge_collapse_costs.ptr,
                 C,
                 this->propagated_costs.ptr
             );
-            CUDA_CHECK(cudaGetLastError());CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaGetLastError());
 
             // 5. Collapse edges
             this->vertices_map.resize(C);      // store collapse map
-            arange_kernel<<<(C + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+            arange_kernel<<<(C + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
                 this->vertices_map.ptr,
                 C
             );
-            collapse_edges_kernel<<<(E + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+            collapse_edges_kernel<<<(E + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
                 this->atlas_chart_adj.ptr,
                 this->edge_collapse_costs.ptr,
                 this->propagated_costs.ptr,
@@ -1127,30 +1158,31 @@ void CuMesh::compute_charts(
                 this->atlas_chart_normal_cones.ptr,
                 cu_end_flag
             );
-            CUDA_CHECK(cudaGetLastError());CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaGetLastError());
 
             // End of iteration
-            CUDA_CHECK(cudaMemcpy(&h_end_flag, cu_end_flag, sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpyAsync(&h_end_flag, cu_end_flag, sizeof(int), cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
             if (h_end_flag == 1) break;
 
             // 6. Compress chart ids
             this->atlas_num_charts = compress_ids(this->vertices_map.ptr, C, this->cub_temp_storage);
             this->temp_storage.resize(F * sizeof(int));
-            index_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+            index_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
                 this->vertices_map.ptr,
                 this->atlas_chart_ids.ptr,
                 F,
                 reinterpret_cast<int*>(this->temp_storage.ptr)
             );
-            CUDA_CHECK(cudaGetLastError());CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaGetLastError());
             swap_buffers(this->atlas_chart_ids, this->temp_storage);
         }
 
         // Refine charts
         for (int j = 0; j < refine_iterations; j++) {
-            compute_chart_normal_cones(*this);
+            compute_chart_normal_cones(*this, stream);
             this->temp_storage.resize(F * sizeof(int));
-            refine_charts_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+            refine_charts_kernel<<<(F + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, stream>>>(
                 this->atlas_chart_normal_cones.ptr,
                 this->face_normals.ptr,
                 this->vertices.ptr,
@@ -1169,50 +1201,52 @@ void CuMesh::compute_charts(
         }
 
         // After refinement, the chart may become disconnected, so we need to re-assign chart ids
-        reassign_chart_ids(*this);
+        reassign_chart_ids(*this, stream);
     }
     CUDA_CHECK(cudaFree(cu_end_flag));
 
     // Finalizing: calculate vmap, chart face and chart face offset
-    construct_chart_mesh(*this);
+    construct_chart_mesh(*this, stream);
 }
 
 
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> CuMesh::read_atlas_charts() {
+    cudaStream_t stream = current_stream();
+
     auto chart_ids = torch::empty({ static_cast<int64_t>(this->faces.size) }, torch::dtype(torch::kInt32).device(torch::kCUDA));
-    CUDA_CHECK(cudaMemcpy(
+    CUDA_CHECK(cudaMemcpyAsync(
         chart_ids.data_ptr<int>(),
         this->atlas_chart_ids.ptr,
         this->faces.size * sizeof(int),
-        cudaMemcpyDeviceToDevice
+        cudaMemcpyDeviceToDevice, stream
     ));
     auto vertex_map = torch::empty({ static_cast<int64_t>(this->atlas_chart_vertex_map.size) }, torch::dtype(torch::kInt32).device(torch::kCUDA));
-    CUDA_CHECK(cudaMemcpy(
+    CUDA_CHECK(cudaMemcpyAsync(
         vertex_map.data_ptr<int>(),
         this->atlas_chart_vertex_map.ptr,
         this->atlas_chart_vertex_map.size * sizeof(int),
-        cudaMemcpyDeviceToDevice
+        cudaMemcpyDeviceToDevice, stream
     ));
     auto chart_faces = torch::empty({ static_cast<int64_t>(this->atlas_chart_faces.size), 3 }, torch::dtype(torch::kInt32).device(torch::kCUDA));
-    CUDA_CHECK(cudaMemcpy(
+    CUDA_CHECK(cudaMemcpyAsync(
         chart_faces.data_ptr<int>(),
         this->atlas_chart_faces.ptr,
         this->atlas_chart_faces.size * 3 * sizeof(int),
-        cudaMemcpyDeviceToDevice
+        cudaMemcpyDeviceToDevice, stream
     ));
     auto chart_vertex_offset = torch::empty({ static_cast<int64_t>(this->atlas_chart_vertex_offset.size) }, torch::dtype(torch::kInt32).device(torch::kCUDA));
-    CUDA_CHECK(cudaMemcpy(
+    CUDA_CHECK(cudaMemcpyAsync(
         chart_vertex_offset.data_ptr<int>(),
         this->atlas_chart_vertex_offset.ptr,
         this->atlas_chart_vertex_offset.size * sizeof(int),
-        cudaMemcpyDeviceToDevice
+        cudaMemcpyDeviceToDevice, stream
     ));
     auto chart_face_offset = torch::empty({ static_cast<int64_t>(this->atlas_chart_faces_offset.size) }, torch::dtype(torch::kInt32).device(torch::kCUDA));
-    CUDA_CHECK(cudaMemcpy(
+    CUDA_CHECK(cudaMemcpyAsync(
         chart_face_offset.data_ptr<int>(),
         this->atlas_chart_faces_offset.ptr,
         this->atlas_chart_faces_offset.size * sizeof(int),
-        cudaMemcpyDeviceToDevice
+        cudaMemcpyDeviceToDevice, stream
     ));
     return std::make_tuple(this->atlas_num_charts, chart_ids, vertex_map, chart_faces, chart_vertex_offset, chart_face_offset);
 }
