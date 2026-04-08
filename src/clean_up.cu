@@ -227,6 +227,16 @@ static __global__ void select_first_in_each_group_kernel(
 }
 
 
+#if defined(__HIP_PLATFORM_AMD__)
+#include <rocprim/types/tuple.hpp>
+struct int3_decomposer
+{
+    __host__ __device__ ::rocprim::tuple<int&, int&, int&> operator()(int3& key) const
+    {
+        return ::rocprim::tuple<int&, int&, int&>{key.x, key.y, key.z};
+    }
+};
+#else
 struct int3_decomposer
 {
     __host__ __device__ ::cuda::std::tuple<int&, int&, int&> operator()(int3& key) const
@@ -234,6 +244,7 @@ struct int3_decomposer
         return {key.x, key.y, key.z};
     }
 };
+#endif
 
 
 void CuMesh::remove_duplicate_faces() {

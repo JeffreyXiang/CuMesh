@@ -115,9 +115,7 @@ ext_modules = [
         ],
         extra_compile_args={
             "cxx": cxx_flags,
-            "nvcc": nvcc_flags + [
-                # The following definitions must be undefined
-                # since we need half-precision operation.
+            "nvcc": nvcc_flags if IS_HIP else nvcc_flags + [
                 "--extended-lambda",
                 "-U__CUDA_NO_HALF_OPERATORS__",
                 "-U__CUDA_NO_HALF_CONVERSIONS__",
