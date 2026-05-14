@@ -460,6 +460,7 @@ void CuMesh::fill_holes(float max_hole_perimeter) {
 
     // Early return if no boundary loops
     if (L == 0 || E == 0) {
+        this->clear_cache();
         return;
     }
 
@@ -543,6 +544,7 @@ void CuMesh::fill_holes(float max_hole_perimeter) {
     if (new_num_bound_loops == 0) {
         CUDA_CHECK(cudaFree(cu_new_loop_boundaries_cnt));
         CUDA_CHECK(cudaFree(cu_bound_loop_mask));
+        this->clear_cache();
         return;
     }
 
