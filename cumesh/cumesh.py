@@ -1,6 +1,8 @@
 from typing import *
 import math
+import threading
 import torch
+from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 from .xatlas import Atlas
 from . import _C
@@ -405,69 +407,184 @@ class CuMesh:
         """
         return self.cu_mesh.read_atlas_charts()
     
+    def _compute_cluster_charts_worker(
+        self,
+        cluster_index: int,
+        chart_vertices_i: torch.Tensor,
+        chart_faces_i: torch.Tensor,
+        chart_vmap_i: torch.Tensor,
+        xatlas_compute_charts_kwargs: dict,
+        results_list: list,
+        results_lock: threading.Lock,
+    ) -> None:
+        """
+        Worker function for parallel per-cluster chart computation.
+        
+        Args:
+            cluster_index: Index of the cluster being processed.
+            chart_vertices_i: Vertex data for this cluster.
+            chart_faces_i: Face data for this cluster.
+            chart_vmap_i: Vertex map for this cluster.
+            xatlas_compute_charts_kwargs: Options for compute_charts.
+            results_list: Shared list to append results to (thread-safe via lock).
+            results_lock: Threading lock for results_list access.
+        """
+        try:
+            # Create an independent Atlas for this cluster
+            atlas = Atlas()
+            atlas.add_mesh(chart_vertices_i, chart_faces_i)
+            
+            # Compute charts for this cluster independently
+            atlas.compute_charts(**xatlas_compute_charts_kwargs)
+            
+            # Get the result (vmap, faces, uvs). If atlas has no meshes (empty cluster),
+            # return empty tensors instead of raising.
+            try:
+                vmap, x_faces, x_uvs = atlas.get_mesh(0)
+            except Exception:
+                vmap = torch.empty((0,), dtype=torch.int64)
+                x_faces = torch.empty((0, 3), dtype=torch.int32)
+                x_uvs = torch.empty((0, 2), dtype=torch.float32)
+
+            # Thread-safe append to results
+            with results_lock:
+                results_list.append({
+                    'cluster_index': cluster_index,
+                    'chart_vmap_i': chart_vmap_i,
+                    'vmap': vmap,
+                    'x_faces': x_faces,
+                    'x_uvs': x_uvs,
+                })
+        except Exception as e:
+            # Log error safely
+            with results_lock:
+                results_list.append({
+                    'cluster_index': cluster_index,
+                    'error': str(e),
+                })
+    
     def uv_unwrap(
         self,
         compute_charts_kwargs: dict={},
         xatlas_compute_charts_kwargs: dict={},
         xatlas_pack_charts_kwargs: dict={},
         return_vmaps: bool=False,
-        verbose: bool=False
+        verbose: bool=False,
+        max_workers: int=5,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
-        Parameterize the mesh using the accelerated mesh clustering and Xatlas
+        Parameterize the mesh using accelerated mesh clustering and Xatlas with parallel per-cluster processing.
         
         Args:
-            compute_charts_kwargs: a dictionary of options for the compute_charts function.
-            xatlas_compute_charts_kwargs: a dictionary of options for the xatlas compute_charts function.
-            xatlas_pack_charts_kwargs: a dictionary of options for the xatlas pack_charts function.
-            return_vmaps: whether to return the vertex maps.
-            verbose: whether to print the progress.
+            compute_charts_kwargs: Options for the fast mesh clustering step.
+            xatlas_compute_charts_kwargs: Options for per-cluster xatlas compute_charts.
+            xatlas_pack_charts_kwargs: Options for final global xatlas pack_charts.
+            return_vmaps: Whether to return vertex maps.
+            verbose: Whether to print progress.
+            max_workers: Maximum number of worker threads for parallel cluster processing (default 5).
             
         Returns:
             A tuple of:
                 - the vertex positions
                 - the face indices
                 - the uv coordinates
-                - (optional) the map from the new vertex indices to the old vertex indices
+                - (optional) the map from new vertex indices to old vertex indices
         """
-        xatlas_compute_charts_kwargs['verbose'] = verbose
+        # Ensure verbose flags are set
+        xatlas_compute_charts_kwargs = {**xatlas_compute_charts_kwargs}
+        xatlas_pack_charts_kwargs = {**xatlas_pack_charts_kwargs}
         xatlas_pack_charts_kwargs['verbose'] = verbose
         
         self.remove_degenerate_faces()
         
-        # 1. Fast mesh clustering
+        # ===== STAGE 1: Fast mesh clustering (GPU-accelerated, single-threaded) =====
         self.compute_charts(**compute_charts_kwargs)
         new_vertices, new_faces = self.read()
         num_charts, charts_id, chart_vmap, chart_faces, chart_vertex_offset, chart_face_offset = self.read_atlas_charts()
+        
         chart_vertices = new_vertices[chart_vmap].cpu()
         chart_faces = chart_faces.cpu()
         chart_vertex_offset = chart_vertex_offset.cpu()
         chart_face_offset = chart_face_offset.cpu()
         chart_vmap = chart_vmap.cpu()
+        
         if verbose:
             print(f"Get {num_charts} clusters after fast clustering")
         
-        # 2. Xatlas packing
-        xatlas = Atlas()
-        chart_vmaps = []
-        for i in tqdm(range(num_charts), desc="Adding clusters to xatlas", disable=not verbose):
+        # ===== STAGE 2: Parallel per-cluster chart computation =====
+        # Prepare cluster data
+        clusters_data = []
+        for i in range(num_charts):
             chart_faces_i = chart_faces[chart_face_offset[i]:chart_face_offset[i+1]] - chart_vertex_offset[i]
             chart_vertices_i = chart_vertices[chart_vertex_offset[i]:chart_vertex_offset[i+1]]
             chart_vmap_i = chart_vmap[chart_vertex_offset[i]:chart_vertex_offset[i+1]]
-            chart_vmaps.append(chart_vmap_i)
-            xatlas.add_mesh(chart_vertices_i, chart_faces_i)
-        xatlas.compute_charts(**xatlas_compute_charts_kwargs)
-        xatlas.pack_charts(**xatlas_pack_charts_kwargs)
+            clusters_data.append((i, chart_vertices_i, chart_faces_i, chart_vmap_i))
+        
+        # Process clusters in parallel with thread pool
+        results_list = []
+        results_lock = threading.Lock()
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for cluster_idx, chart_verts, chart_faces_idx, chart_vmap_idx in clusters_data:
+                future = executor.submit(
+                    self._compute_cluster_charts_worker,
+                    cluster_idx,
+                    chart_verts,
+                    chart_faces_idx,
+                    chart_vmap_idx,
+                    xatlas_compute_charts_kwargs,
+                    results_list,
+                    results_lock,
+                )
+                futures.append(future)
+            
+            # Wait for all workers with progress bar
+            if verbose:
+                for _ in tqdm(futures, desc="Computing charts in parallel", total=len(futures)):
+                    pass
+            else:
+                for future in futures:
+                    future.result()  # Raise any exceptions
+        
+        # Check for errors
+        for result in results_list:
+            if 'error' in result:
+                raise RuntimeError(f"Cluster {result['cluster_index']} failed: {result['error']}")
+        
+        # Sort results by cluster index to maintain order
+        results_list.sort(key=lambda r: r['cluster_index'])
+        
+        # ===== STAGE 3: Global atlas merge and packing (single-threaded, sequential) =====
+        # Create a single global atlas for packing
+        global_atlas = Atlas()
+        
+        # Add all chart results to the global atlas in order
+        for result in tqdm(results_list, desc="Building global atlas", disable=not verbose):
+            chart_vertices_i = chart_vertices[chart_vertex_offset[result['cluster_index']]:chart_vertex_offset[result['cluster_index']+1]]
+            chart_faces_i = chart_faces[chart_face_offset[result['cluster_index']]:chart_face_offset[result['cluster_index']+1]] - chart_vertex_offset[result['cluster_index']]
+            global_atlas.add_mesh(chart_vertices_i, chart_faces_i)
+        
+        # Perform global packing (this must be sequential for UV overlap avoidance)
+        if verbose:
+            print("Performing global atlas packing...")
+        global_atlas.compute_charts(**xatlas_compute_charts_kwargs)  # Ensure charts are finalized
+        global_atlas.pack_charts(**xatlas_pack_charts_kwargs)
+        
+        # ===== STAGE 4: Gather final results =====
         vmaps = []
         faces = []
         uvs = []
         cnt = 0
-        for i in tqdm(range(num_charts), desc="Gathering results from xatlas", disable=not verbose):
-            vmap, x_faces, x_uvs = xatlas.get_mesh(i)
-            vmaps.append(chart_vmaps[i][vmap])
+        
+        for i in tqdm(range(num_charts), desc="Gathering results from global atlas", disable=not verbose):
+            vmap, x_faces, x_uvs = global_atlas.get_mesh(i)
+            chart_vmap_original = chart_vmap[chart_vertex_offset[i]:chart_vertex_offset[i+1]]
+            vmaps.append(chart_vmap_original[vmap])
             faces.append(x_faces + cnt)
             uvs.append(x_uvs)
             cnt += vmap.shape[0]
+        
         vmaps = torch.cat(vmaps, dim=0)
         vertices = new_vertices.cpu()[vmaps]
         faces = torch.cat(faces, dim=0)
