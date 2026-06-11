@@ -92,15 +92,20 @@ static torch::Tensor buffer_to_tensor(const Buffer<T> buffer) {
             cudaMemcpyDeviceToDevice
         ));
     } else {
-        CUDA_CHECK(cudaMemcpy2D(
-            tensor.data_ptr(),
-            dst_bytes,
-            buffer.ptr,
-            sizeof(T),
-            dst_bytes,
-            count,
-            cudaMemcpyDeviceToDevice
-        ));
+        // gfx1151/ROCm: hipMemcpy2D fails above ~1M rows — copy in row chunks
+        static constexpr int64_t kChunk = 1 << 16;
+        for (int64_t row = 0; row < count; row += kChunk) {
+            int64_t rows = std::min(kChunk, count - row);
+            CUDA_CHECK(cudaMemcpy2D(
+                static_cast<char*>(tensor.data_ptr()) + row * dst_bytes,
+                dst_bytes,
+                static_cast<const char*>(static_cast<const void*>(buffer.ptr)) + row * sizeof(T),
+                sizeof(T),
+                dst_bytes,
+                rows,
+                cudaMemcpyDeviceToDevice
+            ));
+        }
     }
 
     return tensor;
@@ -112,22 +117,18 @@ void CuMesh::init(const torch::Tensor& vertices, const torch::Tensor& faces) {
     size_t num_faces = faces.size(0);
     this->vertices.resize(num_vertices);
     this->faces.resize(num_faces);
-    CUDA_CHECK(cudaMemcpy2D(
+    // gfx1151/ROCm: hipMemcpy2D fails with hipErrorInvalidValue above ~1M rows.
+    // Both copies are contiguous (pitch == width), so use linear memcpy.
+    CUDA_CHECK(cudaMemcpy(
         this->vertices.ptr,
-        sizeof(float3),
         vertices.data_ptr<float>(),
-        sizeof(float) * 3,
-        sizeof(float) * 3,
-        num_vertices,
+        sizeof(float) * 3 * num_vertices,
         cudaMemcpyDeviceToDevice
     ));
-    CUDA_CHECK(cudaMemcpy2D(
+    CUDA_CHECK(cudaMemcpy(
         this->faces.ptr,
-        sizeof(int3),
         faces.data_ptr<int>(),
-        sizeof(int) * 3,
-        sizeof(int) * 3,
-        num_faces,
+        sizeof(int) * 3 * num_faces,
         cudaMemcpyDeviceToDevice
     ));
 }
