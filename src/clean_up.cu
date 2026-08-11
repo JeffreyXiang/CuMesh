@@ -3,6 +3,9 @@
 #include "shared.h"
 #include <cub/cub.cuh>
 #include <c10/cuda/CUDAStream.h>
+#if defined(__HIP_PLATFORM_AMD__)
+#include <rocprim/types/tuple.hpp>
+#endif
 
 
 namespace cumesh {
@@ -239,10 +242,17 @@ static __global__ void select_first_in_each_group_kernel(
 
 struct int3_decomposer
 {
+#if defined(__HIP_PLATFORM_AMD__)
+    __host__ __device__ ::rocprim::tuple<int&, int&, int&> operator()(int3& key) const
+    {
+        return ::rocprim::tie(key.x, key.y, key.z);
+    }
+#else
     __host__ __device__ ::cuda::std::tuple<int&, int&, int&> operator()(int3& key) const
     {
         return {key.x, key.y, key.z};
     }
+#endif
 };
 
 

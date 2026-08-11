@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# PyTorch hipify generated files (ROCm build artifacts)
+*.hip
+*_hip.h
+*_hip.cpp
+*_hip.cuh
+
+# Example outputs
+examples/cache/
+examples/*.ply
