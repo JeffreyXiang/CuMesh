@@ -21,6 +21,15 @@ __device__ __forceinline__ float get_vertex_val(
     size_t flat_idx = (size_t)x * H * D + (size_t)y * D + z;
     T key = static_cast<T>(flat_idx);
     uint32_t idx = linear_probing_lookup(hashmap_keys, hashmap_vals, key, N_vert);
+    // If the corner was never inserted into the hashmap (e.g. it lies just outside
+    // the narrow band that got voxelized), `idx` is the sentinel UINT32_MAX. Indexing
+    // `udf` with that would read far out of bounds GPU memory, producing undefined /
+    // garbage values that manifest as sporadic non-deterministic spikes in the
+    // remeshed output. Treat missing corners as "far away / outside" so no bogus
+    // isosurface intersection is produced for this edge.
+    if (idx == std::numeric_limits<uint32_t>::max()) {
+        return 1e6f;
+    }
     return udf[idx];
 }
 
