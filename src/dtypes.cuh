@@ -13,9 +13,9 @@ namespace cumesh {
 struct __align__(16) Vec3f {
     float x, y, z;
 
-    __device__ __forceinline__ Vec3f();
-    __device__ __forceinline__ Vec3f(float x, float y, float z);
-    __device__ __forceinline__ Vec3f(float3 v);
+    __host__ __device__ __forceinline__ Vec3f();
+    __host__ __device__ __forceinline__ Vec3f(float x, float y, float z);
+    __host__ __device__ __forceinline__ Vec3f(float3 v);
     __device__ __forceinline__ Vec3f operator+(const Vec3f& o) const;
     __device__ __forceinline__ Vec3f& operator+=(const Vec3f& o);
     __device__ __forceinline__ Vec3f operator-(const Vec3f& o) const;
@@ -55,19 +55,19 @@ struct __align__(16) QEM
 };
 
 
-__device__ __forceinline__ Vec3f::Vec3f() {
+__host__ __device__ __forceinline__ Vec3f::Vec3f() {
     x = 0.0f;
     y = 0.0f;
     z = 0.0f;
 }
 
-__device__ __forceinline__ Vec3f::Vec3f(float x, float y, float z) {
+__host__ __device__ __forceinline__ Vec3f::Vec3f(float x, float y, float z) {
     this->x = x;
     this->y = y;
     this->z = z;
 }
 
-__device__ __forceinline__ Vec3f::Vec3f(float3 v) {
+__host__ __device__ __forceinline__ Vec3f::Vec3f(float3 v) {
     x = v.x;
     y = v.y;
     z = v.z;
