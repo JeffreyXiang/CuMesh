@@ -108,6 +108,9 @@ static torch::Tensor buffer_to_tensor(const Buffer<T> buffer) {
 
 
 void CuMesh::init(const torch::Tensor& vertices, const torch::Tensor& faces) {
+    // Drop connectivity cached for the previous mesh. Most operations reuse a
+    // non-empty cache, so stale edge/face adjacency would be applied to the new mesh.
+    this->clear_cache();
     size_t num_vertices = vertices.size(0);
     size_t num_faces = faces.size(0);
     this->vertices.resize(num_vertices);
