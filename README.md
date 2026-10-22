@@ -11,8 +11,12 @@ Key features include:
 
 ### Prerequisites
 *   Python >= 3.8
-*   PyTorch >= 2.4 (with CUDA support)
-*   CUDA Toolkit >= 12.4 (matching your PyTorch version)
+*   For NVIDIA GPUs:
+    *   PyTorch >= 2.4 with CUDA support
+    *   CUDA Toolkit >= 12.4 (matching your PyTorch version)
+*   For AMD GPUs:
+    *   PyTorch >= 2.4 with ROCm support
+    *   A matching ROCm installation with the HIP compiler
 
 ### Build from Source
 
@@ -20,6 +24,16 @@ Key features include:
 git clone https://github.com/JeffreyXiang/CuMesh.git --recursive
 pip install CuMesh --no-build-isolation
 ```
+
+For a ROCm build, select the backend explicitly and set `GPU_ARCHS` to the target reported by `rocminfo` (for example, `gfx942` for an AMD Instinct MI300X):
+
+```bash
+git clone https://github.com/JeffreyXiang/CuMesh.git --recursive
+cd CuMesh
+BUILD_TARGET=rocm GPU_ARCHS=gfx942 python3 -m pip install . --no-build-isolation -v
+```
+
+Use a semicolon-separated `GPU_ARCHS` value to build for multiple targets, for example `GPU_ARCHS="gfx90a;gfx942"`.
 
 
 ## Quick Start & Modules

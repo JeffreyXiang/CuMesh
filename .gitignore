@@ -205,3 +205,17 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# PyTorch hipify generated files (ROCm build artifacts)
+*.hip
+*_hip.h
+*_hip.cpp
+*_hip.cuh
+# hipify replaces a "cuda" substring anywhere in the directory path with "hip"
+# when it writes a rewritten header, so a Windows ROCm build can drop a copy of
+# hip_cuda_compat/ here.
+hip_hip_compat/
+
+# Example outputs
+examples/cache/
+examples/*.ply
